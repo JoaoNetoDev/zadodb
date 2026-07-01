@@ -186,6 +186,31 @@
           ]
         },
         {
+          "name": "Query objects (eq + like)",
+          "request": {
+            "method": "GET",
+            "url": {
+              "raw": "{{baseUrl}}/v1/classes/{{className}}/objects?like.nome=%25nio%25ivo%25&limit=100",
+              "host": [ "{{baseUrl}}" ],
+              "path": [ "v1", "classes", "{{className}}", "objects" ],
+              "query": [
+                { "key": "like.nome", "value": "%25nio%25ivo%25", "description": "SQL LIKE: %=any, _=one char (case-insensitive by default)" },
+                { "key": "eq.uf", "value": "SP", "disabled": true, "description": "exact match on a field" },
+                { "key": "ci", "value": "false", "disabled": true, "description": "opt into case-sensitive" },
+                { "key": "limit", "value": "100" }
+              ]
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": { "type": "text/javascript", "exec": [
+                "pm.test('200 OK', () => pm.response.to.have.status(200));"
+              ] }
+            }
+          ]
+        },
+        {
           "name": "Delete object",
           "request": { "method": "DELETE", "url": "{{baseUrl}}/v1/classes/{{className}}/objects/{{objectId}}" },
           "event": [

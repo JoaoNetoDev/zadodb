@@ -98,7 +98,7 @@ duráveis. Se ocorrer erro ou crash sem `201`, o lote inteiro fica ausente
 256 MiB). Erros: `404` classe não existe, `400` corpo não é array de objetos ou
 lote grande demais.
 
-### `GET /v1/classes/{class}/objects?limit=&offset=` — lista objetos
+### `GET /v1/classes/{class}/objects?limit=&offset=` — lista/consulta objetos
 Ordenado por `id` crescente. `limit` padrão 100, `offset` padrão 0.
 ```json
 200 {
@@ -107,6 +107,34 @@ Ordenado por `id` crescente. `limit` padrão 100, `offset` padrão 0.
 }
 ```
 Erro: `404` classe não existe.
+
+**Filtros (WHERE).** Combináveis por `AND`, aplicados por campo do objeto:
+
+| Param | Significado |
+|---|---|
+| `eq.<campo>=valor` | Igualdade exata (comparação como string) |
+| `like.<campo>=padrão` | SQL LIKE: `%` = qualquer sequência, `_` = um caractere |
+| `ci=false` | Opta por case-**sensitive** (o padrão é case-insensitive) |
+
+`limit`/`offset` paginam sobre os **resultados** que casaram. Lembre de
+URL-encodar o `%` como `%25`.
+
+Exemplos:
+```
+# nome contendo "nio" e depois "ivo" (ex.: "Antonio Nascivo"):
+GET /v1/classes/logradouro/objects?like.nome=%25nio%25ivo%25&limit=100
+
+# UF exata E nome começando por "Rua":
+GET /v1/classes/logradouro/objects?eq.uf=SP&like.nome=Rua%25
+
+# case-sensitive:
+GET /v1/classes/logradouro/objects?eq.uf=SP&ci=false
+```
+
+> **Custo**: não há índice secundário — cada consulta é um *full scan* da
+> classe, O(n). Ordem de ~200ms para 100k objetos, ~alguns segundos para
+> milhões. Ótimo para buscas ocasionais; para busca rápida e repetida em
+> escala, índices secundários são o próximo passo (fase futura).
 
 ## Códigos de erro
 

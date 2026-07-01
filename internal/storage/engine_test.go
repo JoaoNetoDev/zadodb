@@ -140,6 +140,52 @@ func TestEngineListPaginationAndMerge(t *testing.T) {
 	}
 }
 
+func TestEngineQueryObjects(t *testing.T) {
+	e := openEngine(t, t.TempDir())
+	e.CreateClass("Item")
+	// Even ids get tag "even", odd get "odd".
+	for i := 1; i <= 20; i++ {
+		tag := "odd"
+		if i%2 == 0 {
+			tag = "even"
+		}
+		e.CreateObject("Item", []byte(fmt.Sprintf(`%s-%d`, tag, i)))
+	}
+
+	// match keeps objects whose stored bytes contain "even".
+	evenMatch := func(stored []byte) (bool, error) {
+		for i := 0; i+4 <= len(stored); i++ {
+			if string(stored[i:i+4]) == "even" {
+				return true, nil
+			}
+		}
+		return false, nil
+	}
+	got, err := e.QueryObjects("Item", evenMatch, 0, 0)
+	if err != nil {
+		t.Fatalf("QueryObjects: %v", err)
+	}
+	if len(got) != 10 {
+		t.Fatalf("matched %d, want 10", len(got))
+	}
+	// Ascending id order and all even.
+	for i, o := range got {
+		if o.ID != int64((i+1)*2) {
+			t.Fatalf("got[%d].ID = %d, want %d", i, o.ID, (i+1)*2)
+		}
+	}
+	// Pagination applies to matches.
+	page, _ := e.QueryObjects("Item", evenMatch, 3, 2)
+	if len(page) != 3 || page[0].ID != 6 {
+		t.Fatalf("paged matches = len %d first %d, want len 3 first 6", len(page), page[0].ID)
+	}
+	// nil match behaves like ListObjects (all 20).
+	all, _ := e.QueryObjects("Item", nil, 0, 0)
+	if len(all) != 20 {
+		t.Fatalf("nil match = %d, want 20", len(all))
+	}
+}
+
 func TestEngineDropClass(t *testing.T) {
 	e := openEngine(t, t.TempDir())
 	e.CreateClass("Temp")

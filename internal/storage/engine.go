@@ -386,6 +386,17 @@ func (e *Engine) DeleteObject(class string, id int64) error {
 // ListObjects returns objects of a class in ascending id order, merging the
 // snapshot with overlay deltas, paginated by limit/offset.
 func (e *Engine) ListObjects(class string, limit, offset int) ([]Object, error) {
+	return e.QueryObjects(class, nil, limit, offset)
+}
+
+// QueryObjects returns objects of a class in ascending id order, optionally
+// filtered by match (called with each object's stored bytes; keep it if true).
+// Pagination applies to the matching objects. A nil match keeps everything.
+//
+// There is no secondary index: this is a full scan of the class that decodes
+// every object through match. Cost is O(class size) per query — fine for
+// occasional/administrative lookups, not for high-frequency queries.
+func (e *Engine) QueryObjects(class string, match func(stored []byte) (bool, error), limit, offset int) ([]Object, error) {
 	if !e.ClassExists(class) {
 		return nil, ErrNoClass
 	}
@@ -419,8 +430,18 @@ func (e *Engine) ListObjects(class string, limit, offset int) ([]Object, error) 
 	}
 	e.mu.RUnlock()
 
+	// Collect matching ids.
 	ids := make([]int64, 0, len(merged))
-	for id := range merged {
+	for id, data := range merged {
+		if match != nil {
+			ok, err := match(data)
+			if err != nil {
+				return nil, err
+			}
+			if !ok {
+				continue
+			}
+		}
 		ids = append(ids, id)
 	}
 	sort.Slice(ids, func(i, j int) bool { return ids[i] < ids[j] })
