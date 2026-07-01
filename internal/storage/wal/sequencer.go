@@ -20,7 +20,10 @@ var ErrClosed = errors.New("wal: sequencer closed")
 // single goroutine owns the file, appends need no lock; TxID assignment is
 // therefore naturally race-free.
 type Sequencer struct {
-	w    *Writer
+	// w is the active WAL writer. It is reassigned by doRotate (on the run
+	// goroutine) and read concurrently by Offset/Close, so it is held behind an
+	// atomic pointer.
+	w    atomic.Pointer[Writer]
 	mode FsyncMode
 	reqs chan *request
 	rot  chan *rotateReq
@@ -55,12 +58,12 @@ func NewSequencer(w *Writer, mode FsyncMode, initialTxID uint64, queue int) *Seq
 		queue = 1024
 	}
 	s := &Sequencer{
-		w:    w,
 		mode: mode,
 		reqs: make(chan *request, queue),
 		rot:  make(chan *rotateReq),
 		done: make(chan struct{}),
 	}
+	s.w.Store(w)
 	s.nextTx.Store(initialTxID)
 	s.wg.Add(1)
 	go s.run()
@@ -71,7 +74,7 @@ func NewSequencer(w *Writer, mode FsyncMode, initialTxID uint64, queue int) *Seq
 func (s *Sequencer) LastTxID() uint64 { return s.nextTx.Load() }
 
 // Offset returns the current WAL end offset.
-func (s *Sequencer) Offset() int64 { return s.w.Offset() }
+func (s *Sequencer) Offset() int64 { return s.w.Load().Offset() }
 
 // Submit appends payload to the WAL and blocks until it is durable (per the
 // fsync policy), returning the assigned TxID.
@@ -82,8 +85,22 @@ func (s *Sequencer) Submit(payload []byte) (uint64, error) {
 	case <-s.done:
 		return 0, ErrClosed
 	}
-	res := <-req.resp
-	return res.txID, res.err
+	// Prefer a real answer if one is already available, so a durably-committed
+	// write is never misreported as closed during shutdown.
+	select {
+	case res := <-req.resp:
+		return res.txID, res.err
+	default:
+	}
+	// Also watch done while awaiting the reply: if the sequencer is closing, the
+	// request may have been enqueued into the buffer just as the run goroutine
+	// exited, so nobody will ever answer it. done unblocks us with ErrClosed.
+	select {
+	case res := <-req.resp:
+		return res.txID, res.err
+	case <-s.done:
+		return 0, ErrClosed
+	}
 }
 
 // Rotate cuts the WAL at a clean record boundary: the current log is fsynced
@@ -104,12 +121,13 @@ func (s *Sequencer) Rotate(retiredPath string) error {
 }
 
 func (s *Sequencer) doRotate(req *rotateReq) {
-	if err := s.w.Sync(); err != nil {
+	cur := s.w.Load()
+	if err := cur.Sync(); err != nil {
 		req.done <- err
 		return
 	}
-	active := s.w.Path()
-	if err := s.w.Close(); err != nil {
+	active := cur.Path()
+	if err := cur.Close(); err != nil {
 		req.done <- err
 		return
 	}
@@ -119,10 +137,17 @@ func (s *Sequencer) doRotate(req *rotateReq) {
 	}
 	nw, err := OpenWriter(active)
 	if err != nil {
+		// The old writer is already closed and renamed; try to restore it so
+		// the sequencer is not left permanently wedged.
+		if rerr := os.Rename(req.retiredPath, active); rerr == nil {
+			if restored, oerr := OpenWriter(active); oerr == nil {
+				s.w.Store(restored)
+			}
+		}
 		req.done <- fmt.Errorf("wal: rotate reopen: %w", err)
 		return
 	}
-	s.w = nw
+	s.w.Store(nw)
 	req.done <- nil
 }
 
@@ -131,7 +156,7 @@ func (s *Sequencer) doRotate(req *rotateReq) {
 func (s *Sequencer) Close() error {
 	s.closeOnce.Do(func() { close(s.done) })
 	s.wg.Wait()
-	return s.w.Close()
+	return s.w.Load().Close()
 }
 
 func (s *Sequencer) run() {
@@ -154,19 +179,21 @@ func (s *Sequencer) run() {
 			batch = s.collectBatch(batch)
 		}
 
-		// Assign TxIDs and append every record in the batch.
+		// Assign TxIDs and append every record in the batch to a single writer
+		// (loaded once so a concurrent rotation cannot split a batch).
+		w := s.w.Load()
 		txIDs = txIDs[:0]
 		var err error
 		for _, r := range batch {
 			tx := s.nextTx.Add(1)
 			txIDs = append(txIDs, tx)
 			if err == nil {
-				err = s.w.Append(tx, r.payload)
+				err = w.Append(tx, r.payload)
 			}
 		}
 		// A single fsync makes the whole batch durable.
 		if err == nil {
-			err = s.w.Sync()
+			err = w.Sync()
 		}
 		// Deliver the durability result exactly once per request.
 		for i, r := range batch {

@@ -224,6 +224,51 @@ func TestSequencerConcurrentGroupCommit(t *testing.T) {
 	testSequencerConcurrency(t, GroupCommitMode(2*time.Millisecond, 128))
 }
 
+// TestRotateConcurrentWithOffset guards against a data race on the active
+// writer pointer: Offset()/Submit() run on caller goroutines while doRotate
+// reassigns the writer on the sequencer goroutine.
+func TestRotateConcurrentWithOffset(t *testing.T) {
+	dir := t.TempDir()
+	w, err := OpenWriter(filepath.Join(dir, "wal.log"))
+	if err != nil {
+		t.Fatalf("OpenWriter: %v", err)
+	}
+	seq := NewSequencer(w, DefaultFsyncMode(), 0, 1024)
+	defer seq.Close()
+
+	stop := make(chan struct{})
+	var wg sync.WaitGroup
+
+	// Writers + readers of Offset while rotations happen.
+	for i := 0; i < 8; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for {
+				select {
+				case <-stop:
+					return
+				default:
+				}
+				seq.Submit([]byte("x"))
+				_ = seq.Offset()
+				_ = seq.LastTxID()
+			}
+		}()
+	}
+
+	// Repeated rotations.
+	for i := 0; i < 30; i++ {
+		retired := filepath.Join(dir, "retired.log")
+		if err := seq.Rotate(retired); err != nil {
+			t.Fatalf("Rotate: %v", err)
+		}
+		os.Remove(retired) // clear so the next rotate can rename onto it
+	}
+	close(stop)
+	wg.Wait()
+}
+
 func TestSubmitAfterCloseFails(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "test.wal")
 	w, _ := OpenWriter(path)

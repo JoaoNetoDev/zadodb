@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"hash/crc32"
 	"os"
+	"sync/atomic"
 )
 
 // On-disk record framing:
@@ -34,9 +35,11 @@ var crcTable = crc32.MakeTable(crc32.Castagnoli)
 // Writer appends framed records to the WAL file. It is not safe for concurrent
 // use; only the Sequencer writes to it.
 type Writer struct {
-	f      *os.File
-	path   string
-	offset int64
+	f    *os.File
+	path string
+	// offset is the WAL end offset. It is advanced by Append on the sequencer
+	// goroutine and read by Offset from other goroutines, so it is atomic.
+	offset atomic.Int64
 }
 
 // OpenWriter opens (creating if needed) the WAL file for appending.
@@ -50,7 +53,9 @@ func OpenWriter(path string) (*Writer, error) {
 		f.Close()
 		return nil, fmt.Errorf("wal: stat %s: %w", path, err)
 	}
-	return &Writer{f: f, path: path, offset: info.Size()}, nil
+	w := &Writer{f: f, path: path}
+	w.offset.Store(info.Size())
+	return w, nil
 }
 
 // Path returns the WAL file path.
@@ -80,7 +85,7 @@ func (w *Writer) Append(txID uint64, payload []byte) error {
 	if _, err := w.f.Write(payload); err != nil {
 		return fmt.Errorf("wal: append payload: %w", err)
 	}
-	w.offset += int64(recHeaderLen + len(payload))
+	w.offset.Add(int64(recHeaderLen + len(payload)))
 	return nil
 }
 
@@ -93,7 +98,7 @@ func (w *Writer) Sync() error {
 }
 
 // Offset returns the current end-of-log byte offset.
-func (w *Writer) Offset() int64 { return w.offset }
+func (w *Writer) Offset() int64 { return w.offset.Load() }
 
 // Close closes the WAL file.
 func (w *Writer) Close() error { return w.f.Close() }
