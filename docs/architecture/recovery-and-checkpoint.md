@@ -22,9 +22,17 @@ atômico `CURRENT`:
 1. **Rotate**: o sequencer corta o WAL num limite limpo de registro
    (`wal.log` → `wal.applying.log`; um `wal.log` novo e vazio é aberto). Tudo a
    dobrar está agora em `wal.applying.log`.
-2. **Build**: copia `data.<G>.zdb` → `data.<G+1>.zdb.tmp`, aplica os registros
-   do `wal.applying.log` via B+Tree COW, grava a meta (nova raiz +
-   `LastAppliedTxID`), fsync.
+2. **Build (compactante)**: constrói `data.<G+1>.zdb.tmp` por **compactação** —
+   faz o streaming da árvore de `data.<G>.zdb` em ordem de chave, faz o **merge**
+   com os deltas líquidos do `wal.applying.log` (deltas vencem; deletes removem)
+   e faz **bulk-load** de uma B+Tree nova e compacta (folhas empacotadas, sem
+   órfãos). Grava a meta (nova raiz + `LastAppliedTxID`), fsync.
+
+   > Isso é crucial: aplicar o WAL incrementalmente via COW numa árvore grande
+   > amplifica o tamanho sem limite (cada inserção reescreve o caminho e deixa
+   > páginas órfãs). A compactação mantém o arquivo proporcional aos **dados
+   > vivos**. A memória é limitada aos deltas do WAL — a árvore base é
+   > transmitida, nunca materializada por inteiro.
 3. **Publish**: rename `data.<G+1>.zdb.tmp` → `data.<G+1>.zdb` (nome novo, então
    nada mmap-eado é substituído), fsync do diretório.
 4. **Switch**: `WriteCurrent(G+1)` — o ponto atômico em que a nova geração passa

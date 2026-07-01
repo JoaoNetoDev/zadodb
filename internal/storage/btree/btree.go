@@ -87,18 +87,33 @@ func (t *Tree) Delete(key []byte) error {
 
 // makeValue builds a leaf entry, spilling large values into an overflow chain.
 func (t *Tree) makeValue(key, value []byte) (leafEntry, error) {
+	return makeLeafEntry(t.store, key, value)
+}
+
+// makeLeafEntry builds a leaf entry over any store, spilling large values into
+// an overflow chain. Shared by the COW insert path and the bulk builder.
+func makeLeafEntry(store PageStore, key, value []byte) (leafEntry, error) {
 	e := leafEntry{key: append([]byte(nil), key...)}
 	if len(value) <= maxInline {
 		e.inline = append([]byte(nil), value...)
 		return e, nil
 	}
-	ref, err := writeOverflow(t.store, value)
+	ref, err := writeOverflow(store, value)
 	if err != nil {
 		return leafEntry{}, err
 	}
 	e.isOverflow = true
 	e.ov = ref
 	return e, nil
+}
+
+// entrySize returns the serialized byte cost of a leaf entry (matching
+// encodedSize's per-entry accounting).
+func (e leafEntry) size() int {
+	if e.isOverflow {
+		return 2 + len(e.key) + 1 + 16
+	}
+	return 2 + len(e.key) + 1 + 4 + len(e.inline)
 }
 
 func (t *Tree) insert(id page.PageID, ve leafEntry) (page.PageID, *splitResult, error) {

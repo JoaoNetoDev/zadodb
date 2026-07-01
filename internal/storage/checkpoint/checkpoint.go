@@ -19,12 +19,13 @@
 package checkpoint
 
 import (
+	"bytes"
 	"fmt"
 	"io"
 	"os"
 	"path/filepath"
+	"sort"
 
-	"github.com/JoaoNetoDev/zadodb/internal/storage/apply"
 	"github.com/JoaoNetoDev/zadodb/internal/storage/btree"
 	"github.com/JoaoNetoDev/zadodb/internal/storage/layout"
 	"github.com/JoaoNetoDev/zadodb/internal/storage/mvcc"
@@ -73,22 +74,51 @@ const RetiredWALName = "wal.applying.log"
 // in retiredWAL, then atomically publishes it and points CURRENT at it. It
 // returns the highest TxID folded in. It does not touch the live sequencer or
 // read snapshot, so recovery can reuse it to finish an interrupted checkpoint.
+//
+// The new generation is built by COMPACTION: the base tree is streamed in key
+// order and merged with the WAL deltas into a fresh, bulk-loaded B+Tree. This
+// keeps the file proportional to the live data — unlike incremental COW
+// application, which amplifies size without bound.
 func BuildGeneration(dir string, baseGen, newGen uint64, retiredWAL string) (uint64, error) {
 	base := layout.DataFile(dir, baseGen)
 	newTmp := layout.DataFile(dir, newGen) + ".tmp"
-	if err := copyFile(base, newTmp); err != nil {
-		return 0, fmt.Errorf("checkpoint: copy base: %w", err)
-	}
-	lastApplied, root, npages, err := foldWAL(newTmp, retiredWAL)
+
+	// Read the base generation's root and applied position (read-only).
+	baseMgr, err := page.Open(base)
 	if err != nil {
+		return 0, err
+	}
+	baseMeta, err := baseMgr.ReadMeta()
+	if err != nil {
+		baseMgr.Close()
 		return 0, err
 	}
 
-	mgr, err := page.Open(newTmp)
+	// Collect the net WAL deltas beyond what the base already contains.
+	deltas, sortedKeys, lastApplied, err := parseWALDeltas(retiredWAL, baseMeta.LastAppliedTxID)
 	if err != nil {
+		baseMgr.Close()
 		return 0, err
 	}
-	if err := mgr.WriteMeta(page.Meta{Root: root, LastAppliedTxID: lastApplied, NumPages: npages}); err != nil {
+
+	// Build the compacted generation.
+	if err := os.Remove(newTmp); err != nil && !os.IsNotExist(err) {
+		baseMgr.Close()
+		return 0, err
+	}
+	mgr, err := page.Create(newTmp)
+	if err != nil {
+		baseMgr.Close()
+		return 0, err
+	}
+	root, err := mergeBuild(mgr, baseMgr, baseMeta.Root, deltas, sortedKeys)
+	baseMgr.Close()
+	if err != nil {
+		mgr.Close()
+		return 0, err
+	}
+
+	if err := mgr.WriteMeta(page.Meta{Root: root, LastAppliedTxID: lastApplied, NumPages: mgr.NumPages()}); err != nil {
 		mgr.Close()
 		return 0, err
 	}
@@ -112,24 +142,22 @@ func BuildGeneration(dir string, baseGen, newGen uint64, retiredWAL string) (uin
 	return lastApplied, nil
 }
 
-// foldWAL opens the temp data file, applies every retired WAL record with a
-// TxID beyond what the base already contains, and returns the resulting state.
-func foldWAL(dataTmp, retired string) (lastApplied uint64, root page.PageID, npages uint64, err error) {
-	mgr, err := page.Open(dataTmp)
-	if err != nil {
-		return 0, 0, 0, err
-	}
-	defer mgr.Close()
-	meta, err := mgr.ReadMeta()
-	if err != nil {
-		return 0, 0, 0, err
-	}
-	tree := btree.Load(mgr, meta.Root)
-	lastApplied = meta.LastAppliedTxID
+// delta is the net effect of the WAL on a single key.
+type delta struct {
+	data    []byte
+	deleted bool
+}
+
+// parseWALDeltas reads the retired WAL and returns the net per-key deltas beyond
+// baseApplied, their keys sorted ascending, and the highest TxID seen (so ids
+// and txids are never reused even for records already folded into the base).
+func parseWALDeltas(retired string, baseApplied uint64) (map[string]delta, [][]byte, uint64, error) {
+	deltas := make(map[string]delta)
+	lastApplied := baseApplied
 
 	r, err := wal.OpenReader(retired)
 	if err != nil {
-		return 0, 0, 0, err
+		return nil, nil, 0, err
 	}
 	defer r.Close()
 	for {
@@ -138,43 +166,99 @@ func foldWAL(dataTmp, retired string) (lastApplied uint64, root page.PageID, npa
 			break // clean or torn tail: end of the durable prefix
 		}
 		if e != nil {
-			return 0, 0, 0, e
+			return nil, nil, 0, e
 		}
-		if txID <= lastApplied {
-			continue // idempotent: already folded in
+		if txID > lastApplied {
+			lastApplied = txID
+		}
+		if txID <= baseApplied {
+			continue // already folded into the base
 		}
 		entry, e := wal.UnmarshalEntry(payload)
 		if e != nil {
-			return 0, 0, 0, fmt.Errorf("checkpoint: decode entry tx %d: %w", txID, e)
+			return nil, nil, 0, fmt.Errorf("checkpoint: decode entry tx %d: %w", txID, e)
 		}
-		if e := apply.Entry(tree, entry); e != nil {
-			return 0, 0, 0, e
+		// Flatten batches; later records overwrite earlier ones for a key.
+		for _, sub := range entry.Flatten() {
+			switch sub.Op {
+			case wal.OpDelete, wal.OpDropClass:
+				deltas[string(sub.Key())] = delta{deleted: true}
+			default:
+				deltas[string(sub.Key())] = delta{data: sub.Data}
+			}
 		}
-		lastApplied = txID
 	}
-	return lastApplied, tree.Root(), mgr.NumPages(), nil
+
+	sorted := make([][]byte, 0, len(deltas))
+	for k := range deltas {
+		sorted = append(sorted, []byte(k))
+	}
+	sort.Slice(sorted, func(i, j int) bool { return bytes.Compare(sorted[i], sorted[j]) < 0 })
+	return deltas, sorted, lastApplied, nil
 }
 
-// copyFile copies src to dst (truncating dst) and fsyncs dst.
-func copyFile(src, dst string) error {
-	in, err := os.Open(src)
+// mergeBuild streams the base tree in key order, merges the sorted WAL deltas on
+// top (deltas win; deletes drop keys), and bulk-loads the result into a fresh
+// compact B+Tree, returning its root. Memory is bounded to the deltas plus the
+// builder's per-level index — the base tree is streamed, never materialized.
+func mergeBuild(store btree.PageStore, base btree.PageSource, baseRoot page.PageID, deltas map[string]delta, sortedKeys [][]byte) (page.PageID, error) {
+	b := btree.NewBuilder(store)
+	di := 0
+
+	flushDeltasBefore := func(key []byte) error {
+		for di < len(sortedKeys) && bytes.Compare(sortedKeys[di], key) < 0 {
+			dk := sortedKeys[di]
+			d := deltas[string(dk)]
+			di++
+			if d.deleted {
+				continue
+			}
+			if err := b.Add(dk, d.data); err != nil {
+				return err
+			}
+		}
+		return nil
+	}
+
+	var scanErr error
+	err := btree.Scan(base, baseRoot, nil, func(key, val []byte) bool {
+		if scanErr = flushDeltasBefore(key); scanErr != nil {
+			return false
+		}
+		if di < len(sortedKeys) && bytes.Equal(sortedKeys[di], key) {
+			d := deltas[string(sortedKeys[di])]
+			di++
+			if !d.deleted {
+				if scanErr = b.Add(key, d.data); scanErr != nil {
+					return false
+				}
+			}
+			return true // delta overrides (or deletes) the base value
+		}
+		if scanErr = b.Add(key, val); scanErr != nil {
+			return false
+		}
+		return true
+	})
 	if err != nil {
-		return err
+		return 0, err
 	}
-	defer in.Close()
-	out, err := os.OpenFile(dst, os.O_RDWR|os.O_CREATE|os.O_TRUNC, 0o644)
-	if err != nil {
-		return err
+	if scanErr != nil {
+		return 0, scanErr
 	}
-	if _, err := io.Copy(out, in); err != nil {
-		out.Close()
-		return err
+	// Remaining deltas are keys greater than everything in the base.
+	for di < len(sortedKeys) {
+		dk := sortedKeys[di]
+		d := deltas[string(dk)]
+		di++
+		if d.deleted {
+			continue
+		}
+		if err := b.Add(dk, d.data); err != nil {
+			return 0, err
+		}
 	}
-	if err := out.Sync(); err != nil {
-		out.Close()
-		return err
-	}
-	return out.Close()
+	return b.Finish()
 }
 
 // cleanupOldGenerations removes data files older than keep. Failures (e.g. a
