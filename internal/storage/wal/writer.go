@@ -78,14 +78,17 @@ func (w *Writer) Append(txID uint64, payload []byte) error {
 	crc = crc32.Update(crc, crcTable, payload)
 	binary.LittleEndian.PutUint32(hdr[20:], crc)
 
-	// O_APPEND makes each Write land atomically at end-of-file.
-	if _, err := w.f.Write(hdr[:]); err != nil {
-		return fmt.Errorf("wal: append header: %w", err)
+	// Write the whole record (header + payload) in a single Write so a process
+	// kill cannot land between the two, leaving an orphan header that would
+	// desync the log. (A real power loss can still tear the write at the block
+	// level; recovery truncates the log to its last valid record to handle that.)
+	rec := make([]byte, 0, recHeaderLen+len(payload))
+	rec = append(rec, hdr[:]...)
+	rec = append(rec, payload...)
+	if _, err := w.f.Write(rec); err != nil {
+		return fmt.Errorf("wal: append record: %w", err)
 	}
-	if _, err := w.f.Write(payload); err != nil {
-		return fmt.Errorf("wal: append payload: %w", err)
-	}
-	w.offset.Add(int64(recHeaderLen + len(payload)))
+	w.offset.Add(int64(len(rec)))
 	return nil
 }
 

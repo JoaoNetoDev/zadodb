@@ -109,8 +109,17 @@ func Recover(dir string) (*Result, error) {
 
 	// Replay the live WAL into the overlay. Records at or below the active
 	// generation's LastAppliedTxID are already folded in and skipped.
-	replayed, maxTx, err := replayWAL(layout.WALFile(dir), meta.LastAppliedTxID, gen)
+	walPath := layout.WALFile(dir)
+	replayed, maxTx, durableOffset, err := replayWAL(walPath, meta.LastAppliedTxID, gen)
 	if err != nil {
+		return nil, err
+	}
+	// Truncate the WAL to its last valid record. A crash may have left a torn or
+	// partial record at (or before) the tail; without truncation, subsequent
+	// appends would sit AFTER that garbage and the next recovery would stop at
+	// it, silently dropping everything after. Truncating makes appends resume
+	// cleanly right past the durable prefix.
+	if err := truncateWAL(walPath, durableOffset); err != nil {
 		return nil, err
 	}
 
@@ -154,16 +163,17 @@ func initFresh(dir string) error {
 	return layout.WriteCurrent(dir, 0)
 }
 
-// replayWAL reads records with TxID > skipUpTo into the overlay, observing ids,
-// and returns the highest TxID seen (including skipped ones, so ids/txids are
-// never reused).
-func replayWAL(path string, skipUpTo uint64, gen *idgen.Generator) ([]ReplayedEntry, uint64, error) {
+// replayWAL reads records with TxID > skipUpTo into the overlay, observing ids.
+// It returns the replayed entries, the highest TxID seen (including skipped
+// ones, so ids/txids are never reused), and the durable offset — the byte
+// length of the valid prefix (everything before the first torn/corrupt record).
+func replayWAL(path string, skipUpTo uint64, gen *idgen.Generator) ([]ReplayedEntry, uint64, int64, error) {
 	r, err := wal.OpenReader(path)
 	if errors.Is(err, os.ErrNotExist) {
-		return nil, 0, nil
+		return nil, 0, 0, nil
 	}
 	if err != nil {
-		return nil, 0, err
+		return nil, 0, 0, err
 	}
 	defer r.Close()
 
@@ -175,7 +185,7 @@ func replayWAL(path string, skipUpTo uint64, gen *idgen.Generator) ([]ReplayedEn
 			break // clean end or torn tail: stop replaying
 		}
 		if e != nil {
-			return nil, 0, e
+			return nil, 0, 0, e
 		}
 		if txID > maxTx {
 			maxTx = txID
@@ -185,14 +195,33 @@ func replayWAL(path string, skipUpTo uint64, gen *idgen.Generator) ([]ReplayedEn
 		}
 		entry, e := wal.UnmarshalEntry(payload)
 		if e != nil {
-			return nil, 0, fmt.Errorf("recovery: decode entry tx %d: %w", txID, e)
+			return nil, 0, 0, fmt.Errorf("recovery: decode entry tx %d: %w", txID, e)
 		}
 		if entry.Op == wal.OpPut && entry.ObjectID > 0 {
 			gen.Observe(entry.Class, entry.ObjectID)
 		}
 		out = append(out, ReplayedEntry{TxID: txID, Entry: entry})
 	}
-	return out, maxTx, nil
+	return out, maxTx, r.Offset(), nil
+}
+
+// truncateWAL trims the WAL file to the given durable length, discarding any
+// torn tail so future appends resume cleanly.
+func truncateWAL(path string, durableOffset int64) error {
+	info, err := os.Stat(path)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	if info.Size() == durableOffset {
+		return nil // nothing torn
+	}
+	if err := os.Truncate(path, durableOffset); err != nil {
+		return fmt.Errorf("recovery: truncate WAL to %d: %w", durableOffset, err)
+	}
+	return nil
 }
 
 // observeTreeIDs scans the active tree and seeds the generator from stored ids.

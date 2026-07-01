@@ -9,6 +9,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net"
 	"net/http"
 	"os"
@@ -113,13 +114,27 @@ func ensureClass(t *testing.T, addr, class string) {
 	}
 }
 
+// verifyClient reuses connections (keep-alive) so verifying tens of thousands
+// of objects does not exhaust ephemeral ports on Windows.
+var verifyClient = &http.Client{
+	Timeout: 5 * time.Second,
+	Transport: &http.Transport{
+		MaxIdleConns:        64,
+		MaxIdleConnsPerHost: 64,
+		IdleConnTimeout:     30 * time.Second,
+	},
+}
+
 // getObjectN fetches an object and returns its "n" marker.
 func getObjectN(addr, class string, id int64) (n int64, found bool, err error) {
-	resp, err := http.Get(fmt.Sprintf("http://%s/v1/classes/%s/objects/%d", addr, class, id))
+	resp, err := verifyClient.Get(fmt.Sprintf("http://%s/v1/classes/%s/objects/%d", addr, class, id))
 	if err != nil {
 		return 0, false, err
 	}
-	defer resp.Body.Close()
+	defer func() {
+		io.Copy(io.Discard, resp.Body) // drain so the connection can be reused
+		resp.Body.Close()
+	}()
 	if resp.StatusCode == 404 {
 		return 0, false, nil
 	}

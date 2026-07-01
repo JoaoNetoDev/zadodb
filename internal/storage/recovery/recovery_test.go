@@ -176,6 +176,56 @@ func TestRecoverInterruptedCheckpointAfterSwitch(t *testing.T) {
 	assertGet(t, res2.ActiveDataPath, "Pessoa", 1, "alice")
 }
 
+// TestRecoverTruncatesTornTailThenAppendsCleanly reproduces the compound bug
+// that data can be lost if a torn tail is not truncated: after a crash leaves a
+// partial record, the next session appends AFTER it, and a later recovery would
+// stop at the torn record and drop everything after. Recovery must truncate the
+// WAL to its durable prefix so appends resume cleanly.
+func TestRecoverTruncatesTornTailThenAppendsCleanly(t *testing.T) {
+	dir := t.TempDir()
+	Recover(dir) // init gen0 + empty wal
+
+	walPath := layout.WALFile(dir)
+	// One good record, then a partial (torn) tail.
+	goodOff := writeWAL(t, walPath, []wal.WALEntry{
+		{Op: wal.OpPut, Class: "A", ObjectID: 1, Data: []byte("keep")},
+	}, 1)
+	writeWAL(t, walPath, []wal.WALEntry{
+		{Op: wal.OpPut, Class: "A", ObjectID: 2, Data: []byte("partial")},
+	}, 2)
+	// Chop mid-second-record to simulate a torn write.
+	if err := os.Truncate(walPath, goodOff+10); err != nil {
+		t.Fatalf("Truncate: %v", err)
+	}
+
+	// First recovery must truncate the WAL back to the good prefix.
+	res, err := Recover(dir)
+	if err != nil {
+		t.Fatalf("Recover: %v", err)
+	}
+	if len(res.Replayed) != 1 {
+		t.Fatalf("replayed %d, want 1", len(res.Replayed))
+	}
+	if info, _ := os.Stat(walPath); info.Size() != goodOff {
+		t.Fatalf("WAL not truncated: size %d, want %d", info.Size(), goodOff)
+	}
+
+	// Append a new record AFTER truncation (as a fresh session would).
+	writeWAL(t, walPath, []wal.WALEntry{
+		{Op: wal.OpPut, Class: "A", ObjectID: 2, Data: []byte("clean")},
+	}, res.LastTxID+1)
+
+	// Second recovery must see BOTH records — proving the append landed on a
+	// clean boundary, not after garbage.
+	res2, err := Recover(dir)
+	if err != nil {
+		t.Fatalf("second Recover: %v", err)
+	}
+	if len(res2.Replayed) != 2 {
+		t.Fatalf("after clean append, replayed %d, want 2", len(res2.Replayed))
+	}
+}
+
 func assertGet(t *testing.T, dataPath, class string, id int64, want string) {
 	t.Helper()
 	mf, err := mvcc.Open(dataPath)
