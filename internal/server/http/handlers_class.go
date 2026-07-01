@@ -23,32 +23,39 @@ func (s *Server) handleCreateClass(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "name is required")
 		return
 	}
-	if err := s.engine.CreateClass(req.Name); err != nil {
+	if err := s.engine.CreateClass(projectOf(r), req.Name); err != nil {
 		writeEngineError(w, err)
 		return
 	}
-	writeJSON(w, http.StatusCreated, map[string]any{"name": req.Name})
+	writeJSON(w, http.StatusCreated, map[string]any{"name": req.Name, "project": projectOf(r)})
 }
 
 func (s *Server) handleListClasses(w http.ResponseWriter, r *http.Request) {
-	classes := s.engine.ListClasses()
-	writeJSON(w, http.StatusOK, map[string]any{"classes": classes})
+	project := projectOf(r)
+	classes := s.engine.ListClasses(project)
+	writeJSON(w, http.StatusOK, map[string]any{"classes": classes, "project": project})
 }
 
 func (s *Server) handleGetClass(w http.ResponseWriter, r *http.Request) {
 	name := r.PathValue("class")
-	if !s.engine.ClassExists(name) {
+	project := projectOf(r)
+	if !s.engine.ClassExists(project, name) {
 		writeError(w, http.StatusNotFound, "class does not exist")
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"name": name})
+	writeJSON(w, http.StatusOK, map[string]any{"name": name, "project": project})
 }
 
 func (s *Server) handleDeleteClass(w http.ResponseWriter, r *http.Request) {
 	name := r.PathValue("class")
-	if err := s.engine.DropClass(name); err != nil {
+	if err := s.engine.DropClass(projectOf(r), name); err != nil {
 		writeEngineError(w, err)
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)
+}
+
+// handleListProjects returns the distinct project namespaces that hold classes.
+func (s *Server) handleListProjects(w http.ResponseWriter, r *http.Request) {
+	writeJSON(w, http.StatusOK, map[string]any{"projects": s.engine.ListProjects()})
 }

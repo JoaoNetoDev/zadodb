@@ -70,10 +70,10 @@ func TestRecoverReplaysWAL(t *testing.T) {
 		t.Fatalf("LastTxID = %d, want 3", res.LastTxID)
 	}
 	// The id generator resumed past the highest observed id per class.
-	if got := res.Gen.Next("Pessoa"); got != 3 {
+	if got := res.Gen.Next(wal.ScopeKey("", "Pessoa")); got != 3 {
 		t.Fatalf("next Pessoa id = %d, want 3", got)
 	}
-	if got := res.Gen.Next("Filial"); got != 2 {
+	if got := res.Gen.Next(wal.ScopeKey("", "Filial")); got != 2 {
 		t.Fatalf("next Filial id = %d, want 2", got)
 	}
 }
@@ -136,7 +136,7 @@ func TestRecoverInterruptedCheckpointBeforeSwitch(t *testing.T) {
 		t.Fatalf("replayed = %d, want 0 (all folded)", len(res.Replayed))
 	}
 	// Generator reseeded from the data on disk.
-	if got := res.Gen.Next("Pessoa"); got != 3 {
+	if got := res.Gen.Next(wal.ScopeKey("", "Pessoa")); got != 3 {
 		t.Fatalf("next Pessoa id = %d, want 3", got)
 	}
 }
@@ -281,7 +281,7 @@ func TestRecoverCompleteBatchAppliesAll(t *testing.T) {
 		t.Fatalf("replayed %d, want 2 (whole batch)", len(res.Replayed))
 	}
 	// Generator reseeded from both ids.
-	if got := res.Gen.Next("A"); got != 3 {
+	if got := res.Gen.Next(wal.ScopeKey("", "A")); got != 3 {
 		t.Fatalf("next id = %d, want 3", got)
 	}
 }
@@ -295,7 +295,7 @@ func assertGet(t *testing.T, dataPath, class string, id int64, want string) {
 	defer mf.Close()
 	snap := mf.Acquire()
 	defer snap.Release()
-	got, found, err := snap.Get(wal.ObjectKey(class, id))
+	got, found, err := snap.Get(wal.ObjectKey("", class, id))
 	if err != nil || !found {
 		t.Fatalf("Get %s/%d: found %v err %v", class, id, found, err)
 	}

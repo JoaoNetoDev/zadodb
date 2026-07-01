@@ -29,19 +29,43 @@ func TestEntryMarshalRoundTrip(t *testing.T) {
 
 func TestObjectKeyOrdering(t *testing.T) {
 	// Object keys of the same class must sort ascending by id.
-	k1 := ObjectKey("A", 1)
-	k2 := ObjectKey("A", 2)
-	k10 := ObjectKey("A", 10)
+	k1 := ObjectKey("", "A", 1)
+	k2 := ObjectKey("", "A", 2)
+	k10 := ObjectKey("", "A", 10)
 	if !(bytes.Compare(k1, k2) < 0 && bytes.Compare(k2, k10) < 0) {
 		t.Errorf("object keys not ascending by id")
 	}
 	// Class definition keys sort before object keys of the same class.
-	if bytes.Compare(ClassKey("A"), ObjectKey("A", 1)) >= 0 {
+	if bytes.Compare(ClassKey("", "A"), ObjectKey("", "A", 1)) >= 0 {
 		t.Errorf("class key should sort before object keys")
 	}
 	// Object keys carry the class prefix.
-	if !bytes.HasPrefix(ObjectKey("A", 5), ObjectPrefix("A")) {
+	if !bytes.HasPrefix(ObjectKey("", "A", 5), ObjectPrefix("", "A")) {
 		t.Errorf("object key missing class prefix")
+	}
+}
+
+// TestProjectKeyRoundTrip checks the project namespace layout: the default
+// project keeps the legacy layout (no prefix) and named projects round-trip
+// through the decoders, while staying byte-distinct from the default project.
+func TestProjectKeyRoundTrip(t *testing.T) {
+	// Default project uses the legacy layout: no project separator in the body.
+	if p, c, ok := DecodeClassKey(ClassKey("", "logradouro")); !ok || p != "" || c != "logradouro" {
+		t.Fatalf("default class key: got (%q,%q,%v)", p, c, ok)
+	}
+	if p, c, id, ok := DecodeObjectKey(ObjectKey("", "logradouro", 42)); !ok || p != "" || c != "logradouro" || id != 42 {
+		t.Fatalf("default object key: got (%q,%q,%d,%v)", p, c, id, ok)
+	}
+	// Named project round-trips project + class + id.
+	if p, c, ok := DecodeClassKey(ClassKey("censo", "logradouro")); !ok || p != "censo" || c != "logradouro" {
+		t.Fatalf("named class key: got (%q,%q,%v)", p, c, ok)
+	}
+	if p, c, id, ok := DecodeObjectKey(ObjectKey("censo", "logradouro", 7)); !ok || p != "censo" || c != "logradouro" || id != 7 {
+		t.Fatalf("named object key: got (%q,%q,%d,%v)", p, c, id, ok)
+	}
+	// The same class name in two projects must produce distinct keys.
+	if bytes.Equal(ObjectKey("", "logradouro", 1), ObjectKey("censo", "logradouro", 1)) {
+		t.Errorf("default and named project keys collide")
 	}
 }
 

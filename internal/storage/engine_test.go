@@ -23,14 +23,14 @@ func openEngine(t *testing.T, dir string) *Engine {
 func TestEngineCRUDLifecycle(t *testing.T) {
 	e := openEngine(t, t.TempDir())
 
-	if err := e.CreateClass("Pessoa"); err != nil {
+	if err := e.CreateClass("", "Pessoa"); err != nil {
 		t.Fatalf("CreateClass: %v", err)
 	}
-	if err := e.CreateClass("Pessoa"); !errors.Is(err, ErrClassExists) {
+	if err := e.CreateClass("", "Pessoa"); !errors.Is(err, ErrClassExists) {
 		t.Fatalf("duplicate CreateClass = %v, want ErrClassExists", err)
 	}
 
-	id, err := e.CreateObject("Pessoa", []byte("alice"))
+	id, err := e.CreateObject("", "Pessoa", []byte("alice"))
 	if err != nil {
 		t.Fatalf("CreateObject: %v", err)
 	}
@@ -39,48 +39,48 @@ func TestEngineCRUDLifecycle(t *testing.T) {
 	}
 
 	// Read-after-write from the overlay.
-	got, found, err := e.GetObject("Pessoa", 1)
+	got, found, err := e.GetObject("", "Pessoa", 1)
 	if err != nil || !found || string(got) != "alice" {
 		t.Fatalf("GetObject = (%q,%v,%v), want alice", got, found, err)
 	}
 
 	// Update, then re-read.
-	if err := e.PutObject("Pessoa", 1, []byte("alice-v2")); err != nil {
+	if err := e.PutObject("", "Pessoa", 1, []byte("alice-v2")); err != nil {
 		t.Fatalf("PutObject: %v", err)
 	}
-	got, _, _ = e.GetObject("Pessoa", 1)
+	got, _, _ = e.GetObject("", "Pessoa", 1)
 	if string(got) != "alice-v2" {
 		t.Fatalf("after update = %q, want alice-v2", got)
 	}
 
 	// Delete.
-	if err := e.DeleteObject("Pessoa", 1); err != nil {
+	if err := e.DeleteObject("", "Pessoa", 1); err != nil {
 		t.Fatalf("DeleteObject: %v", err)
 	}
-	if _, found, _ := e.GetObject("Pessoa", 1); found {
+	if _, found, _ := e.GetObject("", "Pessoa", 1); found {
 		t.Fatalf("object should be gone")
 	}
 	// Deleting again is a 404.
-	if err := e.DeleteObject("Pessoa", 1); !errors.Is(err, ErrNotFound) {
+	if err := e.DeleteObject("", "Pessoa", 1); !errors.Is(err, ErrNotFound) {
 		t.Fatalf("delete missing = %v, want ErrNotFound", err)
 	}
 }
 
 func TestEngineErrorsForMissingClass(t *testing.T) {
 	e := openEngine(t, t.TempDir())
-	if _, err := e.CreateObject("Ghost", []byte("x")); !errors.Is(err, ErrNoClass) {
+	if _, err := e.CreateObject("", "Ghost", []byte("x")); !errors.Is(err, ErrNoClass) {
 		t.Fatalf("CreateObject no class = %v, want ErrNoClass", err)
 	}
-	if err := e.CreateClass("bad name!"); !errors.Is(err, ErrInvalidName) {
+	if err := e.CreateClass("", "bad name!"); !errors.Is(err, ErrInvalidName) {
 		t.Fatalf("invalid class name = %v, want ErrInvalidName", err)
 	}
 }
 
 func TestEngineReadAfterCheckpoint(t *testing.T) {
 	e := openEngine(t, t.TempDir())
-	e.CreateClass("Pessoa")
+	e.CreateClass("", "Pessoa")
 	for i := 0; i < 50; i++ {
-		if _, err := e.CreateObject("Pessoa", []byte(fmt.Sprintf("p%d", i))); err != nil {
+		if _, err := e.CreateObject("", "Pessoa", []byte(fmt.Sprintf("p%d", i))); err != nil {
 			t.Fatalf("CreateObject: %v", err)
 		}
 	}
@@ -92,15 +92,15 @@ func TestEngineReadAfterCheckpoint(t *testing.T) {
 		t.Fatalf("overlay size after checkpoint = %d, want 0", s.OverlaySize)
 	}
 	for i := 0; i < 50; i++ {
-		got, found, err := e.GetObject("Pessoa", int64(i+1))
+		got, found, err := e.GetObject("", "Pessoa", int64(i+1))
 		if err != nil || !found || string(got) != fmt.Sprintf("p%d", i) {
 			t.Fatalf("post-checkpoint Get %d = (%q,%v,%v)", i+1, got, found, err)
 		}
 	}
 
 	// Writes after a checkpoint go to the overlay again and merge on read.
-	id, _ := e.CreateObject("Pessoa", []byte("after"))
-	got, found, _ := e.GetObject("Pessoa", id)
+	id, _ := e.CreateObject("", "Pessoa", []byte("after"))
+	got, found, _ := e.GetObject("", "Pessoa", id)
 	if !found || string(got) != "after" {
 		t.Fatalf("post-checkpoint write not visible")
 	}
@@ -108,16 +108,16 @@ func TestEngineReadAfterCheckpoint(t *testing.T) {
 
 func TestEngineListPaginationAndMerge(t *testing.T) {
 	e := openEngine(t, t.TempDir())
-	e.CreateClass("Item")
+	e.CreateClass("", "Item")
 	for i := 0; i < 10; i++ {
-		e.CreateObject("Item", []byte(fmt.Sprintf("v%d", i)))
+		e.CreateObject("", "Item", []byte(fmt.Sprintf("v%d", i)))
 	}
 	e.Checkpoint() // ids 1..10 now in the snapshot
 	// Add more (overlay) and delete one from the snapshot.
-	e.CreateObject("Item", []byte("v10")) // id 11
-	e.DeleteObject("Item", 5)
+	e.CreateObject("", "Item", []byte("v10")) // id 11
+	e.DeleteObject("", "Item", 5)
 
-	all, err := e.ListObjects("Item", 0, 0)
+	all, err := e.ListObjects("", "Item", 0, 0)
 	if err != nil {
 		t.Fatalf("ListObjects: %v", err)
 	}
@@ -134,7 +134,7 @@ func TestEngineListPaginationAndMerge(t *testing.T) {
 		}
 	}
 	// Pagination.
-	page, _ := e.ListObjects("Item", 3, 2)
+	page, _ := e.ListObjects("", "Item", 3, 2)
 	if len(page) != 3 {
 		t.Fatalf("paginated len = %d, want 3", len(page))
 	}
@@ -142,14 +142,14 @@ func TestEngineListPaginationAndMerge(t *testing.T) {
 
 func TestEngineQueryObjects(t *testing.T) {
 	e := openEngine(t, t.TempDir())
-	e.CreateClass("Item")
+	e.CreateClass("", "Item")
 	// Even ids get tag "even", odd get "odd".
 	for i := 1; i <= 20; i++ {
 		tag := "odd"
 		if i%2 == 0 {
 			tag = "even"
 		}
-		e.CreateObject("Item", []byte(fmt.Sprintf(`%s-%d`, tag, i)))
+		e.CreateObject("", "Item", []byte(fmt.Sprintf(`%s-%d`, tag, i)))
 	}
 
 	// match keeps objects whose stored bytes contain "even".
@@ -161,7 +161,7 @@ func TestEngineQueryObjects(t *testing.T) {
 		}
 		return false, nil
 	}
-	got, err := e.QueryObjects("Item", evenMatch, 0, 0)
+	got, err := e.QueryObjects("", "Item", evenMatch, 0, 0)
 	if err != nil {
 		t.Fatalf("QueryObjects: %v", err)
 	}
@@ -175,12 +175,12 @@ func TestEngineQueryObjects(t *testing.T) {
 		}
 	}
 	// Pagination applies to matches.
-	page, _ := e.QueryObjects("Item", evenMatch, 3, 2)
+	page, _ := e.QueryObjects("", "Item", evenMatch, 3, 2)
 	if len(page) != 3 || page[0].ID != 6 {
 		t.Fatalf("paged matches = len %d first %d, want len 3 first 6", len(page), page[0].ID)
 	}
 	// nil match behaves like ListObjects (all 20).
-	all, _ := e.QueryObjects("Item", nil, 0, 0)
+	all, _ := e.QueryObjects("", "Item", nil, 0, 0)
 	if len(all) != 20 {
 		t.Fatalf("nil match = %d, want 20", len(all))
 	}
@@ -188,19 +188,19 @@ func TestEngineQueryObjects(t *testing.T) {
 
 func TestEngineDropClass(t *testing.T) {
 	e := openEngine(t, t.TempDir())
-	e.CreateClass("Temp")
-	id, _ := e.CreateObject("Temp", []byte("x"))
-	if err := e.DropClass("Temp"); !errors.Is(err, ErrClassNotEmpty) {
+	e.CreateClass("", "Temp")
+	id, _ := e.CreateObject("", "Temp", []byte("x"))
+	if err := e.DropClass("", "Temp"); !errors.Is(err, ErrClassNotEmpty) {
 		t.Fatalf("drop non-empty = %v, want ErrClassNotEmpty", err)
 	}
-	e.DeleteObject("Temp", id)
-	if err := e.DropClass("Temp"); err != nil {
+	e.DeleteObject("", "Temp", id)
+	if err := e.DropClass("", "Temp"); err != nil {
 		t.Fatalf("DropClass: %v", err)
 	}
-	if e.ClassExists("Temp") {
+	if e.ClassExists("", "Temp") {
 		t.Fatalf("class still exists after drop")
 	}
-	if err := e.DropClass("Temp"); !errors.Is(err, ErrNoClass) {
+	if err := e.DropClass("", "Temp"); !errors.Is(err, ErrNoClass) {
 		t.Fatalf("drop missing = %v, want ErrNoClass", err)
 	}
 }
@@ -213,27 +213,97 @@ func TestEnginePersistenceViaWAL(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Open: %v", err)
 	}
-	e.CreateClass("Pessoa")
-	e.CreateObject("Pessoa", []byte("alice"))
-	e.CreateObject("Pessoa", []byte("bob"))
+	e.CreateClass("", "Pessoa")
+	e.CreateObject("", "Pessoa", []byte("alice"))
+	e.CreateObject("", "Pessoa", []byte("bob"))
 	e.Close()
 
 	e2 := openEngine(t, dir)
-	if !e2.ClassExists("Pessoa") {
+	if !e2.ClassExists("", "Pessoa") {
 		t.Fatalf("class lost across restart")
 	}
-	got, found, _ := e2.GetObject("Pessoa", 1)
+	got, found, _ := e2.GetObject("", "Pessoa", 1)
 	if !found || string(got) != "alice" {
 		t.Fatalf("object 1 lost: (%q,%v)", got, found)
 	}
-	got, found, _ = e2.GetObject("Pessoa", 2)
+	got, found, _ = e2.GetObject("", "Pessoa", 2)
 	if !found || string(got) != "bob" {
 		t.Fatalf("object 2 lost: (%q,%v)", got, found)
 	}
 	// New ids must continue past the restored maximum.
-	id, _ := e2.CreateObject("Pessoa", []byte("carol"))
+	id, _ := e2.CreateObject("", "Pessoa", []byte("carol"))
 	if id != 3 {
 		t.Fatalf("next id after restart = %d, want 3", id)
+	}
+}
+
+// TestEngineProjectIsolation checks that the same class name in two projects is
+// independent (separate objects, separate id sequences), that the default
+// project coexists with named ones, and that all of it survives a checkpoint and
+// a restart (recovery must rebuild the class set and id generator per project).
+func TestEngineProjectIsolation(t *testing.T) {
+	dir := t.TempDir()
+	e, err := Open(Config{Dir: dir})
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+
+	// Same class name "Rua" in the default project and in two named projects.
+	for _, p := range []string{"", "censo2020", "censo2022"} {
+		if err := e.CreateClass(p, "Rua"); err != nil {
+			t.Fatalf("CreateClass(%q): %v", p, err)
+		}
+	}
+	// A named project must not accidentally see the default project's class.
+	if e.ClassExists("censo2020", "Bairro") {
+		t.Fatalf("phantom class across project")
+	}
+
+	// Independent id sequences: first object in each project is id 1.
+	for _, p := range []string{"", "censo2020", "censo2022"} {
+		id, err := e.CreateObject(p, "Rua", []byte(p+"-first"))
+		if err != nil || id != 1 {
+			t.Fatalf("CreateObject(%q) id=%d err=%v, want id 1", p, id, err)
+		}
+	}
+	// Values do not bleed across projects.
+	for _, p := range []string{"", "censo2020", "censo2022"} {
+		got, found, _ := e.GetObject(p, "Rua", 1)
+		if !found || string(got) != p+"-first" {
+			t.Fatalf("GetObject(%q,1) = (%q,%v), want %q", p, got, found, p+"-first")
+		}
+	}
+
+	// ListProjects reflects the three namespaces holding classes.
+	projects := e.ListProjects()
+	if len(projects) != 3 || projects[0] != "" || projects[1] != "censo2020" || projects[2] != "censo2022" {
+		t.Fatalf("ListProjects = %v, want [\"\" censo2020 censo2022]", projects)
+	}
+	// ListClasses is scoped per project.
+	if cs := e.ListClasses("censo2020"); len(cs) != 1 || cs[0] != "Rua" {
+		t.Fatalf("ListClasses(censo2020) = %v, want [Rua]", cs)
+	}
+
+	// Checkpoint then reopen: everything must be rebuilt per project.
+	if err := e.Checkpoint(); err != nil {
+		t.Fatalf("Checkpoint: %v", err)
+	}
+	e.Close()
+
+	e2 := openEngine(t, dir)
+	if got := e2.ListProjects(); len(got) != 3 {
+		t.Fatalf("after restart ListProjects = %v, want 3", got)
+	}
+	for _, p := range []string{"", "censo2020", "censo2022"} {
+		got, found, _ := e2.GetObject(p, "Rua", 1)
+		if !found || string(got) != p+"-first" {
+			t.Fatalf("after restart GetObject(%q,1) = (%q,%v)", p, got, found)
+		}
+		// Id sequence resumes independently past the restored max (id 1 -> next 2).
+		id, _ := e2.CreateObject(p, "Rua", []byte(p+"-second"))
+		if id != 2 {
+			t.Fatalf("after restart next id in %q = %d, want 2", p, id)
+		}
 	}
 }
 
@@ -243,13 +313,13 @@ func TestEngineCreateObjectsBulk(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Open: %v", err)
 	}
-	e.CreateClass("Item")
+	e.CreateClass("", "Item")
 
 	datas := make([][]byte, 500)
 	for i := range datas {
 		datas[i] = []byte(fmt.Sprintf("v%d", i))
 	}
-	ids, err := e.CreateObjectsBulk("Item", datas)
+	ids, err := e.CreateObjectsBulk("", "Item", datas)
 	if err != nil {
 		t.Fatalf("CreateObjectsBulk: %v", err)
 	}
@@ -263,16 +333,16 @@ func TestEngineCreateObjectsBulk(t *testing.T) {
 		}
 	}
 	// Read-after-write from the overlay.
-	got, found, _ := e.GetObject("Item", 250)
+	got, found, _ := e.GetObject("", "Item", 250)
 	if !found || string(got) != "v249" {
 		t.Fatalf("GetObject 250 = (%q,%v), want v249", got, found)
 	}
 	// Empty bulk is a no-op.
-	if ids, err := e.CreateObjectsBulk("Item", nil); err != nil || len(ids) != 0 {
+	if ids, err := e.CreateObjectsBulk("", "Item", nil); err != nil || len(ids) != 0 {
 		t.Fatalf("empty bulk = (%v,%v)", ids, err)
 	}
 	// Bulk on missing class errors.
-	if _, err := e.CreateObjectsBulk("Ghost", [][]byte{[]byte("x")}); !errors.Is(err, ErrNoClass) {
+	if _, err := e.CreateObjectsBulk("", "Ghost", [][]byte{[]byte("x")}); !errors.Is(err, ErrNoClass) {
 		t.Fatalf("bulk missing class = %v, want ErrNoClass", err)
 	}
 
@@ -283,12 +353,12 @@ func TestEngineCreateObjectsBulk(t *testing.T) {
 		t.Fatalf("reopen: %v", err)
 	}
 	defer e2.Close()
-	all, _ := e2.ListObjects("Item", 0, 0)
+	all, _ := e2.ListObjects("", "Item", 0, 0)
 	if len(all) != 500 {
 		t.Fatalf("after restart: %d objects, want 500", len(all))
 	}
 	// Next id continues past the batch.
-	if id, _ := e2.CreateObject("Item", []byte("next")); id != 501 {
+	if id, _ := e2.CreateObject("", "Item", []byte("next")); id != 501 {
 		t.Fatalf("next id after restart = %d, want 501", id)
 	}
 }
@@ -296,9 +366,9 @@ func TestEngineCreateObjectsBulk(t *testing.T) {
 func TestEngineBulkAtomicViaCheckpoint(t *testing.T) {
 	dir := t.TempDir()
 	e, _ := Open(Config{Dir: dir})
-	e.CreateClass("Item")
+	e.CreateClass("", "Item")
 	datas := [][]byte{[]byte("a"), []byte("b"), []byte("c")}
-	e.CreateObjectsBulk("Item", datas)
+	e.CreateObjectsBulk("", "Item", datas)
 	// Checkpoint folds the single batch record; all three must survive.
 	if err := e.Checkpoint(); err != nil {
 		t.Fatalf("Checkpoint: %v", err)
@@ -306,7 +376,7 @@ func TestEngineBulkAtomicViaCheckpoint(t *testing.T) {
 	e.Close()
 
 	e2 := openEngine(t, dir)
-	all, _ := e2.ListObjects("Item", 0, 0)
+	all, _ := e2.ListObjects("", "Item", 0, 0)
 	if len(all) != 3 {
 		t.Fatalf("after checkpoint+restart: %d objects, want 3", len(all))
 	}
@@ -320,8 +390,8 @@ func TestEngineConcurrentWriters(t *testing.T) {
 		t.Fatalf("Open: %v", err)
 	}
 	defer e.Close()
-	e.CreateClass("A")
-	e.CreateClass("B")
+	e.CreateClass("", "A")
+	e.CreateClass("", "B")
 
 	const writers = 20
 	const per = 50
@@ -335,7 +405,7 @@ func TestEngineConcurrentWriters(t *testing.T) {
 				class = "B"
 			}
 			for j := 0; j < per; j++ {
-				if _, err := e.CreateObject(class, []byte(fmt.Sprintf("w%d-%d", i, j))); err != nil {
+				if _, err := e.CreateObject("", class, []byte(fmt.Sprintf("w%d-%d", i, j))); err != nil {
 					t.Errorf("CreateObject: %v", err)
 					return
 				}
@@ -351,8 +421,8 @@ func TestEngineConcurrentWriters(t *testing.T) {
 		t.Fatal("deadlock: concurrent writers did not finish in 60s")
 	}
 
-	a, _ := e.ListObjects("A", 0, 0)
-	b, _ := e.ListObjects("B", 0, 0)
+	a, _ := e.ListObjects("", "A", 0, 0)
+	b, _ := e.ListObjects("", "B", 0, 0)
 	if len(a)+len(b) != writers*per {
 		t.Fatalf("total objects = %d, want %d", len(a)+len(b), writers*per)
 	}
@@ -362,18 +432,18 @@ func TestEngineConcurrentWriters(t *testing.T) {
 func TestEnginePersistenceViaCheckpoint(t *testing.T) {
 	dir := t.TempDir()
 	e, _ := Open(Config{Dir: dir})
-	e.CreateClass("Pessoa")
-	e.CreateObject("Pessoa", []byte("alice"))
+	e.CreateClass("", "Pessoa")
+	e.CreateObject("", "Pessoa", []byte("alice"))
 	e.Checkpoint()
-	e.CreateObject("Pessoa", []byte("bob")) // in WAL only, post-checkpoint
+	e.CreateObject("", "Pessoa", []byte("bob")) // in WAL only, post-checkpoint
 	e.Close()
 
 	e2 := openEngine(t, dir)
-	got, found, _ := e2.GetObject("Pessoa", 1)
+	got, found, _ := e2.GetObject("", "Pessoa", 1)
 	if !found || string(got) != "alice" {
 		t.Fatalf("checkpointed object lost: (%q,%v)", got, found)
 	}
-	got, found, _ = e2.GetObject("Pessoa", 2)
+	got, found, _ = e2.GetObject("", "Pessoa", 2)
 	if !found || string(got) != "bob" {
 		t.Fatalf("post-checkpoint object lost: (%q,%v)", got, found)
 	}
