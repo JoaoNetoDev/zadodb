@@ -1,0 +1,28 @@
+# Compiled binaries
+/zadodb
+/zadodb.exe
+/dist/
+/bin/
+
+# Test data directories
+/data/
+*.zdb
+*.zdb.new
+/wal/
+*.wal
+
+# Go build/test artifacts
+*.test
+*.out
+coverage.txt
+coverage.html
+
+# OS / editor
+.DS_Store
+Thumbs.db
+*.swp
+.idea/
+.vscode/
+
+# Local scratch
+/tmp/
