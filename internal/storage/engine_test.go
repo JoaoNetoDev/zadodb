@@ -3,7 +3,11 @@ package storage
 import (
 	"errors"
 	"fmt"
+	"sync"
 	"testing"
+	"time"
+
+	"github.com/JoaoNetoDev/zadodb/internal/storage/wal"
 )
 
 func openEngine(t *testing.T, dir string) *Engine {
@@ -184,6 +188,52 @@ func TestEnginePersistenceViaWAL(t *testing.T) {
 	id, _ := e2.CreateObject("Pessoa", []byte("carol"))
 	if id != 3 {
 		t.Fatalf("next id after restart = %d, want 3", id)
+	}
+}
+
+// TestEngineConcurrentWriters exercises many writers on the same and different
+// classes at once, checking for deadlock (timeout guard) and correct counts.
+func TestEngineConcurrentWriters(t *testing.T) {
+	e, err := Open(Config{Dir: t.TempDir(), Fsync: wal.GroupCommitMode(2*time.Millisecond, 256)})
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer e.Close()
+	e.CreateClass("A")
+	e.CreateClass("B")
+
+	const writers = 20
+	const per = 50
+	var wg sync.WaitGroup
+	for i := 0; i < writers; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			class := "A"
+			if i%2 == 0 {
+				class = "B"
+			}
+			for j := 0; j < per; j++ {
+				if _, err := e.CreateObject(class, []byte(fmt.Sprintf("w%d-%d", i, j))); err != nil {
+					t.Errorf("CreateObject: %v", err)
+					return
+				}
+			}
+		}(i)
+	}
+
+	done := make(chan struct{})
+	go func() { wg.Wait(); close(done) }()
+	select {
+	case <-done:
+	case <-time.After(60 * time.Second):
+		t.Fatal("deadlock: concurrent writers did not finish in 60s")
+	}
+
+	a, _ := e.ListObjects("A", 0, 0)
+	b, _ := e.ListObjects("B", 0, 0)
+	if len(a)+len(b) != writers*per {
+		t.Fatalf("total objects = %d, want %d", len(a)+len(b), writers*per)
 	}
 }
 
