@@ -35,6 +35,7 @@ func (s *Server) routes() http.Handler {
 
 	mux.HandleFunc("GET /v1/health", s.handleHealth)
 	mux.HandleFunc("GET /v1/stats", s.handleStats)
+	mux.HandleFunc("POST /v1/checkpoint", s.handleCheckpoint)
 
 	mux.HandleFunc("GET /v1/projects", s.handleListProjects)
 
@@ -42,6 +43,10 @@ func (s *Server) routes() http.Handler {
 	mux.HandleFunc("GET /v1/classes", s.handleListClasses)
 	mux.HandleFunc("GET /v1/classes/{class}", s.handleGetClass)
 	mux.HandleFunc("DELETE /v1/classes/{class}", s.handleDeleteClass)
+
+	mux.HandleFunc("POST /v1/classes/{class}/relationships", s.handleCreateRelationship)
+	mux.HandleFunc("GET /v1/classes/{class}/relationships", s.handleListRelationships)
+	mux.HandleFunc("DELETE /v1/classes/{class}/relationships/{name}", s.handleDeleteRelationship)
 
 	mux.HandleFunc("POST /v1/classes/{class}/objects", s.handleCreateObject)
 	mux.HandleFunc("POST /v1/classes/{class}/objects/bulk", s.handleCreateObjectsBulk)
@@ -72,6 +77,22 @@ func (s *Server) Shutdown(ctx context.Context) error {
 
 func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"status": "ok"})
+}
+
+// handleCheckpoint triggers a checkpoint synchronously. Useful after a bulk load
+// when auto-checkpoint is disabled (or its threshold is high), to fold the WAL
+// into a fresh compacted generation on demand.
+func (s *Server) handleCheckpoint(w http.ResponseWriter, r *http.Request) {
+	if err := s.engine.Checkpoint(); err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	st := s.engine.Stats()
+	writeJSON(w, http.StatusOK, map[string]any{
+		"checkpoints":     st.Checkpoints,
+		"active_gen":      st.ActiveGen,
+		"last_checkpoint": st.LastCheckpnt,
+	})
 }
 
 func (s *Server) handleStats(w http.ResponseWriter, r *http.Request) {

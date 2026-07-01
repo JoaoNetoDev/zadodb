@@ -7,7 +7,8 @@
   "variable": [
     { "key": "baseUrl", "value": "http://127.0.0.1:7373" },
     { "key": "className", "value": "Pessoa" },
-    { "key": "objectId", "value": "1" }
+    { "key": "objectId", "value": "1" },
+    { "key": "project", "value": "" }
   ],
   "item": [
     {
@@ -144,7 +145,11 @@
         },
         {
           "name": "Get object",
-          "request": { "method": "GET", "url": "{{baseUrl}}/v1/classes/{{className}}/objects/{{objectId}}" },
+          "request": {
+            "method": "GET",
+            "header": [ { "key": "X-Zado-Project", "value": "{{project}}", "description": "Namespace virtual (projeto). Opcional em qualquer rota de classes/objetos; vazio = projeto padrão." } ],
+            "url": "{{baseUrl}}/v1/classes/{{className}}/objects/{{objectId}}"
+          },
           "event": [
             {
               "listen": "test",
@@ -218,6 +223,229 @@
               "listen": "test",
               "script": { "type": "text/javascript", "exec": [
                 "pm.test('204 No Content', () => pm.response.to.have.status(204));"
+              ] }
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "Projects (X-Zado-Project)",
+      "description": "O header opcional `X-Zado-Project` seleciona um namespace virtual que agrupa classes. Ausente ou vazio = projeto padrão. Vale para qualquer rota de classes/objetos. Controle-o pela variável de collection {{project}}.",
+      "item": [
+        {
+          "name": "List classes (projeto)",
+          "request": {
+            "method": "GET",
+            "header": [ { "key": "X-Zado-Project", "value": "{{project}}", "description": "Namespace virtual; vazio = projeto padrão." } ],
+            "url": "{{baseUrl}}/v1/classes"
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": { "type": "text/javascript", "exec": [
+                "pm.test('200 OK', () => pm.response.to.have.status(200));",
+                "pm.test('has classes array', () => pm.expect(pm.response.json().classes).to.be.an('array'));"
+              ] }
+            }
+          ]
+        },
+        {
+          "name": "Create object (projeto)",
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Content-Type", "value": "application/json" },
+              { "key": "X-Zado-Project", "value": "{{project}}", "description": "Cria o objeto dentro do projeto informado; vazio = projeto padrão." }
+            ],
+            "body": { "mode": "raw", "raw": "{\n  \"codigoIbge\": 2408102,\n  \"nome\": \"Mossoró\",\n  \"codigoUf\": 24\n}" },
+            "url": "{{baseUrl}}/v1/classes/municipio/objects"
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": { "type": "text/javascript", "exec": [
+                "pm.test('201 Created', () => pm.response.to.have.status(201));"
+              ] }
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "Relationships (foreign keys)",
+      "description": "Relacionamentos declaram foreign keys entre classes: `localField` na classe atual aponta para `remoteField` em `toClass`. Uma vez declarados, habilitam filtros por join `eq.<rel>.<campo>` e `like.<rel>.<campo>`. Dataset de exemplo: logradouro.municipioCodigo -> municipio.codigoIbge; municipio.codigoUf -> uf.codigoUf.",
+      "item": [
+        {
+          "name": "Create relationship (logradouro -> municipio)",
+          "request": {
+            "method": "POST",
+            "header": [ { "key": "Content-Type", "value": "application/json" } ],
+            "body": { "mode": "raw", "raw": "{\n  \"name\": \"municipio\",\n  \"localField\": \"municipioCodigo\",\n  \"toClass\": \"municipio\",\n  \"remoteField\": \"codigoIbge\"\n}" },
+            "url": "{{baseUrl}}/v1/classes/logradouro/relationships"
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": { "type": "text/javascript", "exec": [
+                "pm.test('created or exists', () => pm.expect([201,409]).to.include(pm.response.code));"
+              ] }
+            }
+          ]
+        },
+        {
+          "name": "List relationships",
+          "request": { "method": "GET", "url": "{{baseUrl}}/v1/classes/logradouro/relationships" },
+          "event": [
+            {
+              "listen": "test",
+              "script": { "type": "text/javascript", "exec": [
+                "pm.test('200 OK', () => pm.response.to.have.status(200));"
+              ] }
+            }
+          ]
+        },
+        {
+          "name": "Delete relationship (municipio)",
+          "request": { "method": "DELETE", "url": "{{baseUrl}}/v1/classes/logradouro/relationships/municipio" },
+          "event": [
+            {
+              "listen": "test",
+              "script": { "type": "text/javascript", "exec": [
+                "pm.test('204 or 404', () => pm.expect([204,404]).to.include(pm.response.code));"
+              ] }
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "Joins & filtros",
+      "description": "Filtros por classe relacionada usam a sintaxe `eq.<rel>.<campo>` (igualdade) e `like.<rel>.<campo>` (SQL LIKE: %=qualquer sequência, _=um caractere). Por padrão os filtros ignoram caixa (`ci=true`) e acento (`ai=true`); passe `ci=false` para diferenciar maiúsc./minúsc. e `ai=false` para diferenciar acentos.",
+      "item": [
+        {
+          "name": "Join + folding acento/caixa (default)",
+          "request": {
+            "method": "GET",
+            "url": {
+              "raw": "{{baseUrl}}/v1/classes/logradouro/objects?eq.uf.sigla=RN&like.municipio.nome=mossor%25&limit=100",
+              "host": [ "{{baseUrl}}" ],
+              "path": [ "v1", "classes", "logradouro", "objects" ],
+              "query": [
+                { "key": "eq.uf.sigla", "value": "RN", "description": "Filtra por classe relacionada `uf` (via municipio.codigoUf -> uf.codigoUf): apenas logradouros cuja UF tem sigla RN." },
+                { "key": "like.municipio.nome", "value": "mossor%25", "description": "Filtra por classe relacionada `municipio`: nome começando com 'mossor'. Por default ignora acento e caixa, então casa 'Mossoró'." },
+                { "key": "limit", "value": "100" }
+              ]
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": { "type": "text/javascript", "exec": [
+                "pm.test('200 OK', () => pm.response.to.have.status(200));",
+                "pm.test('has objects array', () => pm.expect(pm.response.json().objects).to.be.an('array'));"
+              ] }
+            }
+          ]
+        },
+        {
+          "name": "Join acento-sensível (ai=false)",
+          "request": {
+            "method": "GET",
+            "url": {
+              "raw": "{{baseUrl}}/v1/classes/logradouro/objects?eq.uf.sigla=RN&like.municipio.nome=mossor%25&ai=false&limit=100",
+              "host": [ "{{baseUrl}}" ],
+              "path": [ "v1", "classes", "logradouro", "objects" ],
+              "query": [
+                { "key": "eq.uf.sigla", "value": "RN", "description": "Mesmo join por UF." },
+                { "key": "like.municipio.nome", "value": "mossor%25", "description": "Com `ai=false` o acento importa: 'mossor%' NÃO casa 'Mossoró' (mas casaria 'Mossoro' sem acento)." },
+                { "key": "ai", "value": "false", "description": "Acento-sensível (default é true = ignora acento)." },
+                { "key": "ci", "value": "true", "disabled": true, "description": "Caixa: default true (ignora). Passe false para diferenciar maiúsc./minúsc." },
+                { "key": "limit", "value": "100" }
+              ]
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": { "type": "text/javascript", "exec": [
+                "pm.test('200 OK', () => pm.response.to.have.status(200));"
+              ] }
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "Paginação keyset",
+      "description": "Paginação keyset por id: `?limit=<n>&after=<id>`. A resposta traz `next_after` com o id do último objeto da página; use-o como `?after=<next_after>` para buscar a próxima página. `after=0` (ou ausente) começa do início.",
+      "item": [
+        {
+          "name": "List objects (primeira página)",
+          "request": {
+            "method": "GET",
+            "url": {
+              "raw": "{{baseUrl}}/v1/classes/{{className}}/objects?limit=100&after=0",
+              "host": [ "{{baseUrl}}" ],
+              "path": [ "v1", "classes", "{{className}}", "objects" ],
+              "query": [
+                { "key": "limit", "value": "100", "description": "Tamanho da página." },
+                { "key": "after", "value": "0", "description": "Cursor keyset: retorna objetos com id > after. 0 = do início." }
+              ]
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": { "type": "text/javascript", "exec": [
+                "pm.test('200 OK', () => pm.response.to.have.status(200));",
+                "const j = pm.response.json();",
+                "pm.test('has objects array', () => pm.expect(j.objects).to.be.an('array'));",
+                "if (j.next_after !== undefined && j.next_after !== null) { pm.collectionVariables.set('nextAfter', j.next_after); }"
+              ] }
+            }
+          ]
+        },
+        {
+          "name": "List objects (próxima página, after=next_after)",
+          "request": {
+            "method": "GET",
+            "url": {
+              "raw": "{{baseUrl}}/v1/classes/{{className}}/objects?limit=100&after={{nextAfter}}",
+              "host": [ "{{baseUrl}}" ],
+              "path": [ "v1", "classes", "{{className}}", "objects" ],
+              "query": [
+                { "key": "limit", "value": "100" },
+                { "key": "after", "value": "{{nextAfter}}", "description": "Use o `next_after` retornado pela página anterior." }
+              ]
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": { "type": "text/javascript", "exec": [
+                "pm.test('200 OK', () => pm.response.to.have.status(200));"
+              ] }
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "Checkpoint",
+      "item": [
+        {
+          "name": "Trigger checkpoint",
+          "request": {
+            "method": "POST",
+            "url": "{{baseUrl}}/v1/checkpoint",
+            "description": "Dispara consolidação síncrona do WAL no arquivo de dados (copy-on-write + rename atômico). Útil ao fim de uma carga em massa, especialmente com o servidor em `--checkpoint-manual`."
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": { "type": "text/javascript", "exec": [
+                "pm.test('200 or 204', () => pm.expect([200,204]).to.include(pm.response.code));"
               ] }
             }
           ]

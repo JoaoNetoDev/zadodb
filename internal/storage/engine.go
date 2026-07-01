@@ -11,6 +11,7 @@ package storage
 import (
 	"errors"
 	"fmt"
+	"math"
 	"sort"
 	"sync"
 	"time"
@@ -21,6 +22,7 @@ import (
 	"github.com/JoaoNetoDev/zadodb/internal/storage/mvcc"
 	"github.com/JoaoNetoDev/zadodb/internal/storage/recovery"
 	"github.com/JoaoNetoDev/zadodb/internal/storage/wal"
+	"github.com/vmihailenco/msgpack/v5"
 )
 
 // Sentinel errors surfaced to the API layer.
@@ -30,15 +32,30 @@ var (
 	ErrClassNotEmpty = errors.New("class is not empty")
 	ErrNotFound      = errors.New("object not found")
 	ErrInvalidName   = errors.New("invalid class name")
+	ErrRelExists     = errors.New("relationship already exists")
+	ErrNoRel         = errors.New("relationship does not exist")
 )
+
+// Relationship is a foreign key from a class's local field to a target class's
+// remote field, registered once and used to resolve joins in queries. Name
+// defaults to ToClass and is how queries reference the relation (e.g. the
+// "municipio" in eq.municipio.nome).
+type Relationship struct {
+	Name        string `msgpack:"name" json:"name"`
+	LocalField  string `msgpack:"local" json:"localField"`
+	ToClass     string `msgpack:"to" json:"toClass"`
+	RemoteField string `msgpack:"remote" json:"remoteField"`
+}
 
 // Config configures the storage engine.
 type Config struct {
-	Dir                string
-	Fsync              wal.FsyncMode
-	CheckpointWALBytes int64         // checkpoint when the WAL grows past this (0 = default 64MiB)
-	CheckpointInterval time.Duration // periodic checkpoint if writes are pending (0 = default 5m)
-	QueueDepth         int           // sequencer submission queue depth
+	Dir                  string
+	Fsync                wal.FsyncMode
+	CheckpointWALBytes   int64         // checkpoint when the WAL grows past this (0 = default 64MiB)
+	CheckpointInterval   time.Duration // periodic checkpoint if writes are pending (0 = default 5m)
+	CheckpointManual     bool          // disable automatic checkpoints; only POST /v1/checkpoint (or Checkpoint()) folds
+	CheckpointMaxOverlay int           // force a checkpoint when overlay entries exceed this, even in manual mode (0 = no cap)
+	QueueDepth           int           // sequencer submission queue depth
 }
 
 func (c *Config) withDefaults() {
@@ -92,6 +109,7 @@ type Engine struct {
 	mu        sync.RWMutex
 	overlay   map[string]overlayVal
 	classes   map[string]struct{}
+	rels      map[string]map[string]Relationship // scopeKey(project,fromClass) -> name -> rel
 	activeGen uint64
 
 	ckMu         sync.Mutex // serializes checkpoints
@@ -128,10 +146,15 @@ func Open(cfg Config) (*Engine, error) {
 		idgen:     res.Gen,
 		overlay:   make(map[string]overlayVal),
 		classes:   make(map[string]struct{}),
+		rels:      make(map[string]map[string]Relationship),
 		activeGen: res.ActiveGen,
 		stopCh:    make(chan struct{}),
 	}
 	if err := e.loadClasses(); err != nil {
+		e.Close()
+		return nil, err
+	}
+	if err := e.loadRels(); err != nil {
 		e.Close()
 		return nil, err
 	}
@@ -155,6 +178,33 @@ func (e *Engine) loadClasses() error {
 	})
 }
 
+// loadRels seeds the in-memory relationship set from relationship-definition
+// keys already stored in the active generation.
+func (e *Engine) loadRels() error {
+	snap := e.mapped.Acquire()
+	defer snap.Release()
+	return snap.Scan([]byte{0x03}, func(key, val []byte) bool {
+		if project, class, name, ok := wal.DecodeRelKey(key); ok {
+			var rel Relationship
+			if msgpack.Unmarshal(val, &rel) == nil {
+				rel.Name = name
+				e.putRel(project, class, rel)
+			}
+		}
+		return true
+	})
+}
+
+// putRel stores a relationship in the in-memory map (caller holds no lock at
+// boot; guarded by e.mu elsewhere).
+func (e *Engine) putRel(project, class string, rel Relationship) {
+	sk := scopeKey(project, class)
+	if e.rels[sk] == nil {
+		e.rels[sk] = make(map[string]Relationship)
+	}
+	e.rels[sk][rel.Name] = rel
+}
+
 // applyReplay folds the recovered overlay (not-yet-checkpointed writes) into
 // the live overlay and class set.
 func (e *Engine) applyReplay(replayed []recovery.ReplayedEntry) {
@@ -171,6 +221,18 @@ func (e *Engine) applyReplay(replayed []recovery.ReplayedEntry) {
 		case wal.OpDropClass:
 			e.overlay[key] = overlayVal{txID: r.TxID, deleted: true}
 			delete(e.classes, scopeKey(r.Entry.Project, r.Entry.Class))
+		case wal.OpCreateRel:
+			e.overlay[key] = overlayVal{txID: r.TxID, data: r.Entry.Data}
+			var rel Relationship
+			if msgpack.Unmarshal(r.Entry.Data, &rel) == nil {
+				rel.Name = r.Entry.Name
+				e.putRel(r.Entry.Project, r.Entry.Class, rel)
+			}
+		case wal.OpDropRel:
+			e.overlay[key] = overlayVal{txID: r.TxID, deleted: true}
+			if m := e.rels[scopeKey(r.Entry.Project, r.Entry.Class)]; m != nil {
+				delete(m, r.Entry.Name)
+			}
 		}
 	}
 }
@@ -326,6 +388,83 @@ func (e *Engine) DropClass(project, name string) error {
 	return nil
 }
 
+// ---- Relationships ----
+
+// CreateRelationship registers a foreign key from fromClass.LocalField to
+// rel.ToClass.RemoteField. rel.Name defaults to rel.ToClass and is how queries
+// reference the relation. Both classes must already exist in the project.
+func (e *Engine) CreateRelationship(project, fromClass string, rel Relationship) error {
+	if rel.Name == "" {
+		rel.Name = rel.ToClass
+	}
+	if !validName(fromClass) || !validName(rel.Name) || !validName(rel.ToClass) ||
+		rel.LocalField == "" || rel.RemoteField == "" {
+		return ErrInvalidName
+	}
+	if !e.ClassExists(project, fromClass) || !e.ClassExists(project, rel.ToClass) {
+		return ErrNoClass
+	}
+	sk := scopeKey(project, fromClass)
+	e.mu.RLock()
+	_, exists := e.rels[sk][rel.Name]
+	e.mu.RUnlock()
+	if exists {
+		return ErrRelExists
+	}
+	spec, err := msgpack.Marshal(rel)
+	if err != nil {
+		return err
+	}
+	if _, err := e.submit(wal.WALEntry{Op: wal.OpCreateRel, Project: project, Class: fromClass, Name: rel.Name, Data: spec}, false); err != nil {
+		return err
+	}
+	e.mu.Lock()
+	e.putRel(project, fromClass, rel)
+	e.mu.Unlock()
+	return nil
+}
+
+// DropRelationship removes a relationship by name.
+func (e *Engine) DropRelationship(project, fromClass, name string) error {
+	sk := scopeKey(project, fromClass)
+	e.mu.RLock()
+	_, ok := e.rels[sk][name]
+	e.mu.RUnlock()
+	if !ok {
+		return ErrNoRel
+	}
+	if _, err := e.submit(wal.WALEntry{Op: wal.OpDropRel, Project: project, Class: fromClass, Name: name}, true); err != nil {
+		return err
+	}
+	e.mu.Lock()
+	if m := e.rels[sk]; m != nil {
+		delete(m, name)
+	}
+	e.mu.Unlock()
+	return nil
+}
+
+// ListRelationships returns the relationships declared on a class, sorted by name.
+func (e *Engine) ListRelationships(project, fromClass string) []Relationship {
+	e.mu.RLock()
+	m := e.rels[scopeKey(project, fromClass)]
+	out := make([]Relationship, 0, len(m))
+	for _, r := range m {
+		out = append(out, r)
+	}
+	e.mu.RUnlock()
+	sort.Slice(out, func(i, j int) bool { return out[i].Name < out[j].Name })
+	return out
+}
+
+// Relationship returns a single relationship of a class by name.
+func (e *Engine) Relationship(project, fromClass, name string) (Relationship, bool) {
+	e.mu.RLock()
+	defer e.mu.RUnlock()
+	r, ok := e.rels[scopeKey(project, fromClass)][name]
+	return r, ok
+}
+
 // ---- Objects ----
 
 // CreateObject assigns a new id and stores data, returning the id.
@@ -430,78 +569,150 @@ func (e *Engine) ListObjects(project, class string, limit, offset int) ([]Object
 	return e.QueryObjects(project, class, nil, limit, offset)
 }
 
-// QueryObjects returns objects of a class in ascending id order, optionally
-// filtered by match (called with each object's stored bytes; keep it if true).
-// Pagination applies to the matching objects. A nil match keeps everything.
-//
-// There is no secondary index: this is a full scan of the class that decodes
-// every object through match. Cost is O(class size) per query — fine for
-// occasional/administrative lookups, not for high-frequency queries.
+// prefixEnd returns the smallest key strictly greater than every key with the
+// given prefix (the exclusive upper bound of the prefix range), or nil if the
+// prefix is all 0xFF (range runs to the end of the keyspace).
+func prefixEnd(p []byte) []byte {
+	end := append([]byte(nil), p...)
+	for i := len(end) - 1; i >= 0; i-- {
+		if end[i] != 0xff {
+			end[i]++
+			return end[:i+1]
+		}
+	}
+	return nil
+}
+
+// QueryObjects returns objects of a class in ascending id order (offset/limit
+// pagination), optionally filtered by match. It is QueryPage with after == 0.
 func (e *Engine) QueryObjects(project, class string, match func(stored []byte) (bool, error), limit, offset int) ([]Object, error) {
+	return e.QueryPage(project, class, match, limit, offset, 0)
+}
+
+// QueryPage streams a class in ascending id order, merging the mmap snapshot
+// with the in-memory overlay on the fly, applies match, and paginates.
+//
+// Streaming (not materializing the class): the snapshot is scanned in key order
+// and merged with the (small) overlay deltas as two sorted runs, so peak memory
+// is the returned page plus the overlay slice — not the whole class. This is
+// what keeps large classes and joins from exhausting RAM.
+//
+// Keyset pagination: when after > 0, the scan SEEKS to ids strictly greater than
+// after (O(page) via B+Tree range), instead of walking and discarding the first
+// `offset` rows (O(offset)). Prefer after for deep pagination over large classes.
+//
+// There is still no secondary index, so match is evaluated per object; with a
+// filter the scan is O(class size). Without a filter, keyset paging is O(page).
+func (e *Engine) QueryPage(project, class string, match func(stored []byte) (bool, error), limit, offset int, after int64) ([]Object, error) {
 	if !e.ClassExists(project, class) {
 		return nil, ErrNoClass
 	}
-	merged := make(map[int64][]byte)
+	if offset < 0 {
+		offset = 0
+	}
 
-	snap := e.mapped.Acquire()
-	err := snap.Scan(wal.ObjectPrefix(project, class), func(key, val []byte) bool {
-		// The default project's scan prefix is also a byte-prefix of a named
-		// project whose name equals this class, so verify the decoded scope.
-		if p, c, id, ok := wal.DecodeObjectKey(key); ok && p == project && c == class {
-			merged[id] = append([]byte(nil), val...)
+	// Overlay deltas for this class with id > after, sorted ascending by id.
+	type ovDelta struct {
+		id      int64
+		data    []byte
+		deleted bool
+	}
+	var ovl []ovDelta
+	e.mu.RLock()
+	for keyStr, ov := range e.overlay {
+		p, c, id, ok := wal.DecodeObjectKey([]byte(keyStr))
+		if !ok || p != project || c != class || id <= after {
+			continue
+		}
+		ovl = append(ovl, ovDelta{id: id, data: ov.data, deleted: ov.deleted})
+	}
+	e.mu.RUnlock()
+	sort.Slice(ovl, func(i, j int) bool { return ovl[i].id < ovl[j].id })
+
+	prefix := wal.ObjectPrefix(project, class)
+	lo := prefix
+	if after > 0 {
+		// Smallest key strictly greater than the `after` object's key.
+		lo = append(wal.ObjectKey(project, class, after), 0x00)
+	}
+	hi := prefixEnd(prefix)
+
+	var out []Object
+	var scanErr error
+	skipped := 0
+	ovIdx := 0
+
+	// emit applies the matcher, offset and limit. Returns false to stop.
+	emit := func(id int64, data []byte) bool {
+		if limit > 0 && len(out) >= limit {
+			return false
+		}
+		if match != nil {
+			ok, err := match(data)
+			if err != nil {
+				scanErr = err
+				return false
+			}
+			if !ok {
+				return true
+			}
+		}
+		if skipped < offset {
+			skipped++
+			return true
+		}
+		out = append(out, Object{ID: id, Data: append([]byte(nil), data...)})
+		return !(limit > 0 && len(out) >= limit)
+	}
+
+	// flushOverlay emits pending overlay deltas with id below (or at) bound.
+	flushOverlay := func(bound int64, inclusive bool) bool {
+		for ovIdx < len(ovl) {
+			o := ovl[ovIdx]
+			if o.id > bound || (o.id == bound && !inclusive) {
+				break
+			}
+			ovIdx++
+			if o.deleted {
+				continue
+			}
+			if !emit(o.id, o.data) {
+				return false
+			}
 		}
 		return true
+	}
+
+	snap := e.mapped.Acquire()
+	err := snap.ScanRange(lo, hi, func(key, val []byte) bool {
+		p, c, id, ok := wal.DecodeObjectKey(key)
+		if !ok || p != project || c != class {
+			return true // defensive: skip foreign keys sharing the byte-prefix
+		}
+		if !flushOverlay(id, false) { // overlay ids strictly less than id
+			return false
+		}
+		if ovIdx < len(ovl) && ovl[ovIdx].id == id {
+			o := ovl[ovIdx] // overlay overrides the snapshot value
+			ovIdx++
+			if o.deleted {
+				return true
+			}
+			return emit(id, o.data)
+		}
+		return emit(id, val)
 	})
 	snap.Release()
 	if err != nil {
 		return nil, err
 	}
-
-	// Apply overlay deltas for this class.
-	e.mu.RLock()
-	for keyStr, ov := range e.overlay {
-		key := []byte(keyStr)
-		p, c, id, ok := wal.DecodeObjectKey(key)
-		if !ok || p != project || c != class {
-			continue
-		}
-		if ov.deleted {
-			delete(merged, id)
-		} else {
-			merged[id] = append([]byte(nil), ov.data...)
-		}
+	if scanErr != nil {
+		return nil, scanErr
 	}
-	e.mu.RUnlock()
-
-	// Collect matching ids.
-	ids := make([]int64, 0, len(merged))
-	for id, data := range merged {
-		if match != nil {
-			ok, err := match(data)
-			if err != nil {
-				return nil, err
-			}
-			if !ok {
-				continue
-			}
-		}
-		ids = append(ids, id)
-	}
-	sort.Slice(ids, func(i, j int) bool { return ids[i] < ids[j] })
-
-	if offset < 0 {
-		offset = 0
-	}
-	if offset > len(ids) {
-		offset = len(ids)
-	}
-	ids = ids[offset:]
-	if limit > 0 && limit < len(ids) {
-		ids = ids[:limit]
-	}
-	out := make([]Object, 0, len(ids))
-	for _, id := range ids {
-		out = append(out, Object{ID: id, Data: merged[id]})
+	// Overlay ids beyond the snapshot tail (newly inserted, not yet checkpointed).
+	flushOverlay(math.MaxInt64, true)
+	if scanErr != nil {
+		return nil, scanErr
 	}
 	return out, nil
 }
@@ -534,7 +745,9 @@ func (e *Engine) Checkpoint() error {
 	return nil
 }
 
-// checkpointLoop triggers checkpoints by WAL size or interval.
+// checkpointLoop triggers checkpoints by WAL size or interval. In manual mode
+// only the overlay safety cap (CheckpointMaxOverlay) can trigger a fold, so a
+// long bulk load cannot grow the in-memory overlay without bound and OOM.
 func (e *Engine) checkpointLoop() {
 	defer e.wg.Done()
 	ticker := time.NewTicker(1 * time.Second)
@@ -546,11 +759,17 @@ func (e *Engine) checkpointLoop() {
 			return
 		case <-ticker.C:
 			e.mu.RLock()
-			pending := len(e.overlay) > 0
+			overlaySize := len(e.overlay)
 			e.mu.RUnlock()
-			bySize := e.seq.Offset() >= e.cfg.CheckpointWALBytes
-			byTime := pending && time.Since(lastRun) >= e.cfg.CheckpointInterval
-			if bySize || byTime {
+
+			byCap := e.cfg.CheckpointMaxOverlay > 0 && overlaySize >= e.cfg.CheckpointMaxOverlay
+			trigger := byCap
+			if !e.cfg.CheckpointManual {
+				bySize := e.seq.Offset() >= e.cfg.CheckpointWALBytes
+				byTime := overlaySize > 0 && time.Since(lastRun) >= e.cfg.CheckpointInterval
+				trigger = trigger || bySize || byTime
+			}
+			if trigger {
 				if err := e.Checkpoint(); err == nil {
 					lastRun = time.Now()
 				}

@@ -61,6 +61,58 @@ curl "http://127.0.0.1:7373/v1/classes/Pessoa/objects?limit=100"
 Prove a resistência a crash: mate o processo à força (`kill -9` / Stop-Process
 -Force) durante escritas e reinicie — todos os dados confirmados continuam lá.
 
+## Recursos de consulta
+
+Todos os exemplos abaixo estão prontos para uso na
+[collection Postman](docs/api/zadodb.postman_collection.json).
+
+**Projetos (namespace virtual)** — o header opcional `X-Zado-Project` agrupa
+classes num namespace. Ausente/vazio = projeto padrão.
+
+```sh
+curl -H 'X-Zado-Project: cadastro' http://127.0.0.1:7373/v1/classes
+```
+
+**Relacionamentos + join** — declare foreign keys entre classes e filtre por
+classe relacionada com `eq.<rel>.<campo>` e `like.<rel>.<campo>` (SQL LIKE:
+`%`=qualquer sequência, `_`=um caractere).
+
+```sh
+# Declara logradouro.municipioCodigo -> municipio.codigoIbge
+curl -X POST http://127.0.0.1:7373/v1/classes/logradouro/relationships \
+  -d '{"name":"municipio","localField":"municipioCodigo","toClass":"municipio","remoteField":"codigoIbge"}'
+
+# Logradouros de UF=RN cujo município começa com "mossor"
+curl "http://127.0.0.1:7373/v1/classes/logradouro/objects?eq.uf.sigla=RN&like.municipio.nome=mossor%25"
+```
+
+**Busca ignorando acento/caixa** — por padrão os filtros ignoram caixa
+(`ci=true`) e acento (`ai=true`), então `mossor%` casa `Mossoró`. Passe
+`ci=false` para diferenciar maiúsc./minúsc. e `ai=false` para diferenciar
+acentos.
+
+```sh
+curl "http://127.0.0.1:7373/v1/classes/logradouro/objects?like.municipio.nome=mossor%25&ai=false"
+```
+
+**Paginação keyset** — `?limit=<n>&after=<id>`. A resposta traz `next_after`;
+use-o como `?after=<next_after>` para a próxima página (`after=0` começa do
+início).
+
+```sh
+curl "http://127.0.0.1:7373/v1/classes/Pessoa/objects?limit=100&after=0"
+# -> {"objects":[...],"next_after":100}  ->  ...&after=100
+```
+
+**Carga em massa** — suba o servidor com `--checkpoint-manual` (desativa o
+checkpoint automático), insira em lote via `POST .../objects/bulk` e, ao final,
+consolide o WAL de uma vez com um checkpoint síncrono.
+
+```sh
+./zadodb serve --checkpoint-manual
+curl -X POST http://127.0.0.1:7373/v1/checkpoint
+```
+
 ## Cliente
 
 Não há driver dedicado por design: a API é REST/JSON. Use a

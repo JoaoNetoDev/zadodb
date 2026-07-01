@@ -260,11 +260,17 @@ func Get(src PageSource, root page.PageID, key []byte) ([]byte, bool, error) {
 // Scan visits every key/value with the given prefix in ascending order until fn
 // returns false, over any read-only page source.
 func Scan(src PageSource, root page.PageID, prefix []byte, fn func(key, value []byte) bool) error {
+	return ScanRange(src, root, prefix, prefixUpper(prefix), fn)
+}
+
+// ScanRange visits every key/value in the half-open range [lo, hi) in ascending
+// order until fn returns false. lo == nil means "from the start"; hi == nil
+// means "to the end". Internal nodes off the range are pruned, so a tight lo
+// makes this a seek (used for keyset pagination) rather than a full scan.
+func ScanRange(src PageSource, root page.PageID, lo, hi []byte, fn func(key, value []byte) bool) error {
 	if root == page.InvalidPageID {
 		return nil
 	}
-	lo := prefix
-	hi := prefixUpper(prefix)
 	stopped := false
 
 	var walk func(id page.PageID) error
