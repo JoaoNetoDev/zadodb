@@ -146,10 +146,21 @@ func (s *Server) handleDeleteObject(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleListObjects(w http.ResponseWriter, r *http.Request) {
 	class := r.PathValue("class")
-	limit := parseIntDefault(r.URL.Query().Get("limit"), 100)
-	offset := parseIntDefault(r.URL.Query().Get("offset"), 0)
+	q := r.URL.Query()
+	limit := parseIntDefault(q.Get("limit"), 100)
+	offset := parseIntDefault(q.Get("offset"), 0)
 
-	objs, err := s.engine.ListObjects(class, limit, offset)
+	m, err := parseFilters(q)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	var match func([]byte) (bool, error)
+	if m != nil {
+		match = m.match
+	}
+
+	objs, err := s.engine.QueryObjects(class, match, limit, offset)
 	if err != nil {
 		writeEngineError(w, err)
 		return

@@ -160,6 +160,59 @@ func TestHTTPBulkInsert(t *testing.T) {
 	resp3.Body.Close()
 }
 
+func TestHTTPQueryFilters(t *testing.T) {
+	ts := newTestServer(t)
+	base := ts.URL
+	do(t, "POST", base+"/v1/classes", map[string]any{"name": "Logradouro"})
+
+	rows := []map[string]any{
+		{"nome": "Rua Antonio Nascivo", "uf": "SP"},
+		{"nome": "Avenida Ivo Antonio", "uf": "SP"},
+		{"nome": "Rua das Flores", "uf": "RJ"},
+		{"nome": "Travessa Benito Olivo", "uf": "SP"},
+	}
+	b, _ := json.Marshal(rows)
+	resp, _ := http.Post(base+"/v1/classes/Logradouro/objects/bulk", "application/json", bytes.NewReader(b))
+	resp.Body.Close()
+
+	count := func(url string) int {
+		t.Helper()
+		_, m := do(t, "GET", url, nil)
+		objs, _ := m["objects"].([]any)
+		return len(objs)
+	}
+
+	// Equality on uf.
+	if n := count(base + "/v1/classes/Logradouro/objects?eq.uf=SP"); n != 3 {
+		t.Errorf("eq.uf=SP = %d, want 3", n)
+	}
+	if n := count(base + "/v1/classes/Logradouro/objects?eq.uf=RJ"); n != 1 {
+		t.Errorf("eq.uf=RJ = %d, want 1", n)
+	}
+	// LIKE %nio%ivo% (case-insensitive) matches "Antonio Nascivo", "Ivo Antonio"? no (order),
+	// "Benito Olivo"? nio? no. So only "Antonio Nascivo" and... "Antonio" has nio; "Nascivo" has ivo -> 1.
+	if n := count(base + "/v1/classes/Logradouro/objects?like.nome=%25nio%25ivo%25"); n != 1 {
+		t.Errorf("like nio..ivo = %d, want 1", n)
+	}
+	// AND: uf=SP and nome contains "Antonio".
+	if n := count(base + "/v1/classes/Logradouro/objects?eq.uf=SP&like.nome=%25Antonio%25"); n != 2 {
+		t.Errorf("eq.uf=SP AND like Antonio = %d, want 2", n)
+	}
+	// Case-insensitive by default.
+	if n := count(base + "/v1/classes/Logradouro/objects?eq.uf=sp"); n != 3 {
+		t.Errorf("eq.uf=sp (ci default) = %d, want 3", n)
+	}
+	// Opt into case-sensitive: lowercase "sp" no longer matches "SP".
+	if n := count(base + "/v1/classes/Logradouro/objects?eq.uf=sp&ci=false"); n != 0 {
+		t.Errorf("eq.uf=sp ci=false = %d, want 0", n)
+	}
+	// Invalid class -> 404.
+	resp404, _ := do(t, "GET", base+"/v1/classes/Ghost/objects?eq.uf=SP", nil)
+	if resp404.StatusCode != 404 {
+		t.Errorf("filter on missing class = %d, want 404", resp404.StatusCode)
+	}
+}
+
 func TestHTTPErrorCases(t *testing.T) {
 	ts := newTestServer(t)
 	base := ts.URL
