@@ -50,12 +50,29 @@ evitando uma segunda fonte de verdade que poderia divergir após um crash.
 
 ## Chaves
 
-Objetos e definições de classe coexistem num único espaço de chaves ordenado:
+Objetos e definições de classe coexistem num único espaço de chaves ordenado.
+Cada classe vive dentro de um **project** (namespace virtual; ver
+[api/rest-api](../api/rest-api.md)). O project padrão é a string vazia `""` e usa
+o layout **legado**, sem prefixo — assim um banco criado antes dos projects não
+precisa de migração alguma:
 
-- Definição de classe: `0x01` + nome da classe.
-- Objeto: `0x02` + nome da classe + `0x00` + id (uint64 big-endian).
+| | Project padrão (`""`) | Project nomeado |
+|---|---|---|
+| Definição de classe | `0x01` + classe | `0x01` + project + `0x00` + classe |
+| Objeto | `0x02` + classe + `0x00` + id8 | `0x02` + project + `0x00` + classe + `0x00` + id8 |
 
-Nomes de classe são validados (sem `0x00`) na borda, então o separador `0x00` é
-inequívoco. IDs são inteiros positivos crescentes, então big-endian ordena
-ascendente — objetos da mesma classe ficam fisicamente contíguos, o que torna a
-listagem por classe um scan de prefixo eficiente.
+(id = uint64 big-endian.)
+
+Nomes de classe e de project são validados (sem `0x00`) na borda, então os
+separadores `0x00` são inequívocos: uma chave pertence ao project padrão sse seu
+corpo não tem `0x00` antes do id, e a um project nomeado caso contrário (a
+decodificação divide no primeiro `0x00`). IDs são inteiros positivos crescentes,
+então big-endian ordena ascendente — objetos da mesma classe ficam fisicamente
+contíguos, o que torna a listagem por classe um scan de prefixo eficiente.
+
+O project é puramente um prefixo de chave: o write path (WAL→COW→rename), a
+compactação (`btree.Builder`, key-agnostic), o snapshot mmap e o recovery são
+todos idênticos — a garantia de corrupção-zero sob kill não é afetada. Em
+memória, o conjunto de classes e o gerador de ids são chaveados por
+`project + 0x00 + classe` (`wal.ScopeKey`), mantendo a mesma classe independente
+entre projects.

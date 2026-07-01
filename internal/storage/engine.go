@@ -59,6 +59,12 @@ type Object struct {
 	Data []byte
 }
 
+// scopeKey is the in-memory identity of a class within a project. Neither
+// project nor class names may contain 0x00 (enforced by validName), so the
+// separator is unambiguous. Used to key the class set and the id generator so
+// the same class name in two projects stays independent.
+func scopeKey(project, class string) string { return wal.ScopeKey(project, class) }
+
 // Stats is a snapshot of engine counters.
 type Stats struct {
 	LastTxID     uint64
@@ -142,8 +148,8 @@ func (e *Engine) loadClasses() error {
 	snap := e.mapped.Acquire()
 	defer snap.Release()
 	return snap.Scan([]byte{0x01}, func(key, _ []byte) bool {
-		if name, ok := wal.DecodeClassKey(key); ok {
-			e.classes[name] = struct{}{}
+		if project, name, ok := wal.DecodeClassKey(key); ok {
+			e.classes[scopeKey(project, name)] = struct{}{}
 		}
 		return true
 	})
@@ -161,10 +167,10 @@ func (e *Engine) applyReplay(replayed []recovery.ReplayedEntry) {
 			e.overlay[key] = overlayVal{txID: r.TxID, deleted: true}
 		case wal.OpCreateClass:
 			e.overlay[key] = overlayVal{txID: r.TxID, data: r.Entry.Data}
-			e.classes[r.Entry.Class] = struct{}{}
+			e.classes[scopeKey(r.Entry.Project, r.Entry.Class)] = struct{}{}
 		case wal.OpDropClass:
 			e.overlay[key] = overlayVal{txID: r.TxID, deleted: true}
-			delete(e.classes, r.Entry.Class)
+			delete(e.classes, scopeKey(r.Entry.Project, r.Entry.Class))
 		}
 	}
 }
@@ -221,80 +227,114 @@ func (e *Engine) lookup(key []byte) ([]byte, bool, error) {
 	return snap.Get(key)
 }
 
+// ---- Projects ----
+
+// ListProjects returns the distinct project names that currently hold at least
+// one class, sorted. The default project "" is included when it has classes.
+func (e *Engine) ListProjects() []string {
+	e.mu.RLock()
+	seen := make(map[string]struct{})
+	for k := range e.classes {
+		project, _ := splitScopeKey(k)
+		seen[project] = struct{}{}
+	}
+	e.mu.RUnlock()
+	out := make([]string, 0, len(seen))
+	for p := range seen {
+		out = append(out, p)
+	}
+	sort.Strings(out)
+	return out
+}
+
+// splitScopeKey reverses scopeKey.
+func splitScopeKey(k string) (project, class string) {
+	for i := 0; i < len(k); i++ {
+		if k[i] == 0x00 {
+			return k[:i], k[i+1:]
+		}
+	}
+	return "", k
+}
+
 // ---- Classes ----
 
-// CreateClass registers a new class.
-func (e *Engine) CreateClass(name string) error {
-	if !validClassName(name) {
+// CreateClass registers a new class within a project (project "" is the default).
+func (e *Engine) CreateClass(project, name string) error {
+	if !validName(name) || !validProject(project) {
 		return ErrInvalidName
 	}
+	sk := scopeKey(project, name)
 	e.mu.RLock()
-	_, exists := e.classes[name]
+	_, exists := e.classes[sk]
 	e.mu.RUnlock()
 	if exists {
 		return ErrClassExists
 	}
-	if _, err := e.submit(wal.WALEntry{Op: wal.OpCreateClass, Class: name}, false); err != nil {
+	if _, err := e.submit(wal.WALEntry{Op: wal.OpCreateClass, Project: project, Class: name}, false); err != nil {
 		return err
 	}
 	e.mu.Lock()
-	e.classes[name] = struct{}{}
+	e.classes[sk] = struct{}{}
 	e.mu.Unlock()
 	return nil
 }
 
-// ListClasses returns the existing class names, sorted.
-func (e *Engine) ListClasses() []string {
+// ListClasses returns the existing class names in a project, sorted.
+func (e *Engine) ListClasses(project string) []string {
 	e.mu.RLock()
 	out := make([]string, 0, len(e.classes))
-	for c := range e.classes {
-		out = append(out, c)
+	for k := range e.classes {
+		p, c := splitScopeKey(k)
+		if p == project {
+			out = append(out, c)
+		}
 	}
 	e.mu.RUnlock()
 	sort.Strings(out)
 	return out
 }
 
-// ClassExists reports whether a class exists.
-func (e *Engine) ClassExists(name string) bool {
+// ClassExists reports whether a class exists in a project.
+func (e *Engine) ClassExists(project, name string) bool {
 	e.mu.RLock()
-	_, ok := e.classes[name]
+	_, ok := e.classes[scopeKey(project, name)]
 	e.mu.RUnlock()
 	return ok
 }
 
-// DropClass removes an empty class.
-func (e *Engine) DropClass(name string) error {
-	if !e.ClassExists(name) {
+// DropClass removes an empty class from a project.
+func (e *Engine) DropClass(project, name string) error {
+	if !e.ClassExists(project, name) {
 		return ErrNoClass
 	}
 	// Reject if any object of the class remains.
-	objs, err := e.ListObjects(name, 1, 0)
+	objs, err := e.ListObjects(project, name, 1, 0)
 	if err != nil {
 		return err
 	}
 	if len(objs) > 0 {
 		return ErrClassNotEmpty
 	}
-	if _, err := e.submit(wal.WALEntry{Op: wal.OpDropClass, Class: name}, true); err != nil {
+	if _, err := e.submit(wal.WALEntry{Op: wal.OpDropClass, Project: project, Class: name}, true); err != nil {
 		return err
 	}
 	e.mu.Lock()
-	delete(e.classes, name)
+	delete(e.classes, scopeKey(project, name))
 	e.mu.Unlock()
-	e.idgen.Drop(name)
+	e.idgen.Drop(scopeKey(project, name))
 	return nil
 }
 
 // ---- Objects ----
 
 // CreateObject assigns a new id and stores data, returning the id.
-func (e *Engine) CreateObject(class string, data []byte) (int64, error) {
-	if !e.ClassExists(class) {
+func (e *Engine) CreateObject(project, class string, data []byte) (int64, error) {
+	if !e.ClassExists(project, class) {
 		return 0, ErrNoClass
 	}
-	id := e.idgen.Next(class)
-	if _, err := e.submit(wal.WALEntry{Op: wal.OpPut, Class: class, ObjectID: id, Data: data}, false); err != nil {
+	id := e.idgen.Next(scopeKey(project, class))
+	if _, err := e.submit(wal.WALEntry{Op: wal.OpPut, Project: project, Class: class, ObjectID: id, Data: data}, false); err != nil {
 		return 0, err
 	}
 	return id, nil
@@ -307,8 +347,8 @@ func (e *Engine) CreateObject(class string, data []byte) (int64, error) {
 // record (all objects durable) or a torn record (none applied) — never a
 // partial batch. A successful return means every object is durable; on error or
 // a crash without a successful return, the batch may be entirely absent (retry).
-func (e *Engine) CreateObjectsBulk(class string, datas [][]byte) ([]int64, error) {
-	if !e.ClassExists(class) {
+func (e *Engine) CreateObjectsBulk(project, class string, datas [][]byte) ([]int64, error) {
+	if !e.ClassExists(project, class) {
 		return nil, ErrNoClass
 	}
 	if len(datas) == 0 {
@@ -317,10 +357,11 @@ func (e *Engine) CreateObjectsBulk(class string, datas [][]byte) ([]int64, error
 	ids := make([]int64, len(datas))
 	subs := make([]wal.WALEntry, len(datas))
 	ts := time.Now().UnixNano()
+	sk := scopeKey(project, class)
 	for i, d := range datas {
-		id := e.idgen.Next(class)
+		id := e.idgen.Next(sk)
 		ids[i] = id
-		subs[i] = wal.WALEntry{Op: wal.OpPut, Class: class, ObjectID: id, Data: d, Timestamp: ts}
+		subs[i] = wal.WALEntry{Op: wal.OpPut, Project: project, Class: class, ObjectID: id, Data: d, Timestamp: ts}
 	}
 
 	batch := wal.WALEntry{Op: wal.OpBatch, Timestamp: ts, Sub: subs}
@@ -344,49 +385,49 @@ func (e *Engine) CreateObjectsBulk(class string, datas [][]byte) ([]int64, error
 }
 
 // GetObject returns the object's data.
-func (e *Engine) GetObject(class string, id int64) ([]byte, bool, error) {
-	if !e.ClassExists(class) {
+func (e *Engine) GetObject(project, class string, id int64) ([]byte, bool, error) {
+	if !e.ClassExists(project, class) {
 		return nil, false, ErrNoClass
 	}
-	return e.lookup(wal.ObjectKey(class, id))
+	return e.lookup(wal.ObjectKey(project, class, id))
 }
 
 // PutObject replaces an existing object (404 if it does not exist).
-func (e *Engine) PutObject(class string, id int64, data []byte) error {
-	if !e.ClassExists(class) {
+func (e *Engine) PutObject(project, class string, id int64, data []byte) error {
+	if !e.ClassExists(project, class) {
 		return ErrNoClass
 	}
-	_, found, err := e.lookup(wal.ObjectKey(class, id))
+	_, found, err := e.lookup(wal.ObjectKey(project, class, id))
 	if err != nil {
 		return err
 	}
 	if !found {
 		return ErrNotFound
 	}
-	_, err = e.submit(wal.WALEntry{Op: wal.OpPut, Class: class, ObjectID: id, Data: data}, false)
+	_, err = e.submit(wal.WALEntry{Op: wal.OpPut, Project: project, Class: class, ObjectID: id, Data: data}, false)
 	return err
 }
 
 // DeleteObject removes an object (404 if it does not exist).
-func (e *Engine) DeleteObject(class string, id int64) error {
-	if !e.ClassExists(class) {
+func (e *Engine) DeleteObject(project, class string, id int64) error {
+	if !e.ClassExists(project, class) {
 		return ErrNoClass
 	}
-	_, found, err := e.lookup(wal.ObjectKey(class, id))
+	_, found, err := e.lookup(wal.ObjectKey(project, class, id))
 	if err != nil {
 		return err
 	}
 	if !found {
 		return ErrNotFound
 	}
-	_, err = e.submit(wal.WALEntry{Op: wal.OpDelete, Class: class, ObjectID: id}, true)
+	_, err = e.submit(wal.WALEntry{Op: wal.OpDelete, Project: project, Class: class, ObjectID: id}, true)
 	return err
 }
 
 // ListObjects returns objects of a class in ascending id order, merging the
 // snapshot with overlay deltas, paginated by limit/offset.
-func (e *Engine) ListObjects(class string, limit, offset int) ([]Object, error) {
-	return e.QueryObjects(class, nil, limit, offset)
+func (e *Engine) ListObjects(project, class string, limit, offset int) ([]Object, error) {
+	return e.QueryObjects(project, class, nil, limit, offset)
 }
 
 // QueryObjects returns objects of a class in ascending id order, optionally
@@ -396,15 +437,17 @@ func (e *Engine) ListObjects(class string, limit, offset int) ([]Object, error) 
 // There is no secondary index: this is a full scan of the class that decodes
 // every object through match. Cost is O(class size) per query — fine for
 // occasional/administrative lookups, not for high-frequency queries.
-func (e *Engine) QueryObjects(class string, match func(stored []byte) (bool, error), limit, offset int) ([]Object, error) {
-	if !e.ClassExists(class) {
+func (e *Engine) QueryObjects(project, class string, match func(stored []byte) (bool, error), limit, offset int) ([]Object, error) {
+	if !e.ClassExists(project, class) {
 		return nil, ErrNoClass
 	}
 	merged := make(map[int64][]byte)
 
 	snap := e.mapped.Acquire()
-	err := snap.Scan(wal.ObjectPrefix(class), func(key, val []byte) bool {
-		if _, id, ok := wal.DecodeObjectKey(key); ok {
+	err := snap.Scan(wal.ObjectPrefix(project, class), func(key, val []byte) bool {
+		// The default project's scan prefix is also a byte-prefix of a named
+		// project whose name equals this class, so verify the decoded scope.
+		if p, c, id, ok := wal.DecodeObjectKey(key); ok && p == project && c == class {
 			merged[id] = append([]byte(nil), val...)
 		}
 		return true
@@ -418,8 +461,8 @@ func (e *Engine) QueryObjects(class string, match func(stored []byte) (bool, err
 	e.mu.RLock()
 	for keyStr, ov := range e.overlay {
 		key := []byte(keyStr)
-		c, id, ok := wal.DecodeObjectKey(key)
-		if !ok || c != class {
+		p, c, id, ok := wal.DecodeObjectKey(key)
+		if !ok || p != project || c != class {
 			continue
 		}
 		if ov.deleted {
@@ -538,7 +581,7 @@ func (e *Engine) Stats() Stats {
 	}
 }
 
-func validClassName(name string) bool {
+func validName(name string) bool {
 	if name == "" || len(name) > 128 {
 		return false
 	}
@@ -553,4 +596,10 @@ func validClassName(name string) bool {
 		}
 	}
 	return true
+}
+
+// validProject accepts the default project ("") or any valid name. The empty
+// project uses the legacy key layout, so it must remain always allowed.
+func validProject(project string) bool {
+	return project == "" || validName(project)
 }

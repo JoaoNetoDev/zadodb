@@ -28,7 +28,7 @@ func TestConcurrentWritersThroughput(t *testing.T) {
 
 	classes := []string{"Alpha", "Beta", "Gamma", "Delta"}
 	for _, c := range classes {
-		if err := e.CreateClass(c); err != nil {
+		if err := e.CreateClass("", c); err != nil {
 			t.Fatalf("CreateClass %s: %v", c, err)
 		}
 	}
@@ -44,7 +44,7 @@ func TestConcurrentWritersThroughput(t *testing.T) {
 			defer wg.Done()
 			class := classes[i%len(classes)]
 			for j := 0; j < per; j++ {
-				if _, err := e.CreateObject(class, []byte(fmt.Sprintf("w%d-%d", i, j))); err != nil {
+				if _, err := e.CreateObject("", class, []byte(fmt.Sprintf("w%d-%d", i, j))); err != nil {
 					t.Errorf("CreateObject: %v", err)
 					return
 				}
@@ -68,7 +68,7 @@ func TestConcurrentWritersThroughput(t *testing.T) {
 	// All writes must be present and counts must match per class.
 	got := 0
 	for _, c := range classes {
-		objs, err := e.ListObjects(c, 0, 0)
+		objs, err := e.ListObjects("", c, 0, 0)
 		if err != nil {
 			t.Fatalf("ListObjects %s: %v", c, err)
 		}

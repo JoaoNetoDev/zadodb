@@ -49,6 +49,80 @@ func do(t *testing.T, method, url string, body any) (*http.Response, map[string]
 	return resp, m
 }
 
+// doP is like do but sends the X-Zado-Project header to select a namespace.
+func doP(t *testing.T, method, url, project string, body any) (*http.Response, map[string]any) {
+	t.Helper()
+	var buf io.Reader
+	if body != nil {
+		b, _ := json.Marshal(body)
+		buf = bytes.NewReader(b)
+	}
+	req, _ := http.NewRequest(method, url, buf)
+	if project != "" {
+		req.Header.Set("X-Zado-Project", project)
+	}
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("%s %s: %v", method, url, err)
+	}
+	var m map[string]any
+	data, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if len(data) > 0 {
+		json.Unmarshal(data, &m)
+	}
+	return resp, m
+}
+
+// TestHTTPProjectNamespace exercises the X-Zado-Project header: the same class
+// name lives independently in the default project and a named one, objects do
+// not leak across the header, and GET /v1/projects lists the namespaces.
+func TestHTTPProjectNamespace(t *testing.T) {
+	ts := newTestServer(t)
+	base := ts.URL
+
+	// Create class "Rua" in the default project and in project "censo".
+	if resp, _ := do(t, "POST", base+"/v1/classes", map[string]any{"name": "Rua"}); resp.StatusCode != 201 {
+		t.Fatalf("create default class = %d", resp.StatusCode)
+	}
+	if resp, _ := doP(t, "POST", base+"/v1/classes", "censo", map[string]any{"name": "Rua"}); resp.StatusCode != 201 {
+		t.Fatalf("create censo class = %d", resp.StatusCode)
+	}
+
+	// One object in each; both get id 1 (independent sequences).
+	_, m := do(t, "POST", base+"/v1/classes/Rua/objects", map[string]any{"nome": "default-rua"})
+	if m["id"].(float64) != 1 {
+		t.Fatalf("default object id = %v", m["id"])
+	}
+	_, m = doP(t, "POST", base+"/v1/classes/Rua/objects", "censo", map[string]any{"nome": "censo-rua"})
+	if m["id"].(float64) != 1 {
+		t.Fatalf("censo object id = %v", m["id"])
+	}
+
+	// The default project must not see the censo object's value and vice-versa.
+	_, m = do(t, "GET", base+"/v1/classes/Rua/objects/1", nil)
+	if m["nome"] != "default-rua" {
+		t.Fatalf("default GET leaked: %v", m)
+	}
+	_, m = doP(t, "GET", base+"/v1/classes/Rua/objects/1", "censo", nil)
+	if m["nome"] != "censo-rua" {
+		t.Fatalf("censo GET leaked: %v", m)
+	}
+
+	// A class created only in censo is 404 in the default project.
+	doP(t, "POST", base+"/v1/classes", "censo", map[string]any{"name": "Bairro"})
+	if resp, _ := do(t, "GET", base+"/v1/classes/Bairro", nil); resp.StatusCode != 404 {
+		t.Fatalf("cross-project class visibility = %d, want 404", resp.StatusCode)
+	}
+
+	// GET /v1/projects lists the default ("") and named ("censo") namespaces.
+	_, m = do(t, "GET", base+"/v1/projects", nil)
+	projs, _ := m["projects"].([]any)
+	if len(projs) != 2 {
+		t.Fatalf("projects = %v, want default + censo", m["projects"])
+	}
+}
+
 func TestHTTPCRUDFlow(t *testing.T) {
 	ts := newTestServer(t)
 	base := ts.URL

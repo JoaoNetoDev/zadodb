@@ -201,7 +201,7 @@ func replayWAL(path string, skipUpTo uint64, gen *idgen.Generator) ([]ReplayedEn
 		// TxID so the overlay and its later pruning treat them as one unit.
 		for _, sub := range entry.Flatten() {
 			if sub.Op == wal.OpPut && sub.ObjectID > 0 {
-				gen.Observe(sub.Class, sub.ObjectID)
+				gen.Observe(wal.ScopeKey(sub.Project, sub.Class), sub.ObjectID)
 			}
 			out = append(out, ReplayedEntry{TxID: txID, Entry: sub})
 		}
@@ -231,8 +231,8 @@ func truncateWAL(path string, durableOffset int64) error {
 // observeTreeIDs scans the active tree and seeds the generator from stored ids.
 func observeTreeIDs(src btree.PageSource, root page.PageID, gen *idgen.Generator) error {
 	return btree.Scan(src, root, nil, func(key, _ []byte) bool {
-		if class, id, ok := wal.DecodeObjectKey(key); ok {
-			gen.Observe(class, id)
+		if project, class, id, ok := wal.DecodeObjectKey(key); ok {
+			gen.Observe(wal.ScopeKey(project, class), id)
 		}
 		return true
 	})

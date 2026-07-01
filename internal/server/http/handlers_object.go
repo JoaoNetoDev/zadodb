@@ -6,6 +6,7 @@ import (
 	"io"
 	"net/http"
 	"strconv"
+	"strings"
 )
 
 const (
@@ -15,6 +16,7 @@ const (
 
 func (s *Server) handleCreateObject(w http.ResponseWriter, r *http.Request) {
 	class := r.PathValue("class")
+	project := projectOf(r)
 	body, err := io.ReadAll(io.LimitReader(r.Body, maxObjectBytes))
 	if err != nil {
 		writeError(w, http.StatusBadRequest, "cannot read body")
@@ -25,7 +27,7 @@ func (s *Server) handleCreateObject(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "body must be a JSON object: "+err.Error())
 		return
 	}
-	id, err := s.engine.CreateObject(class, stored)
+	id, err := s.engine.CreateObject(project, class, stored)
 	if err != nil {
 		writeEngineError(w, err)
 		return
@@ -43,6 +45,7 @@ const maxBulkObjects = 10000
 
 func (s *Server) handleCreateObjectsBulk(w http.ResponseWriter, r *http.Request) {
 	class := r.PathValue("class")
+	project := projectOf(r)
 	body, err := io.ReadAll(io.LimitReader(r.Body, maxBulkBytes))
 	if err != nil {
 		writeError(w, http.StatusBadRequest, "cannot read body")
@@ -72,7 +75,7 @@ func (s *Server) handleCreateObjectsBulk(w http.ResponseWriter, r *http.Request)
 		datas[i] = stored
 	}
 
-	ids, err := s.engine.CreateObjectsBulk(class, datas)
+	ids, err := s.engine.CreateObjectsBulk(project, class, datas)
 	if err != nil {
 		writeEngineError(w, err)
 		return
@@ -82,11 +85,12 @@ func (s *Server) handleCreateObjectsBulk(w http.ResponseWriter, r *http.Request)
 
 func (s *Server) handleGetObject(w http.ResponseWriter, r *http.Request) {
 	class := r.PathValue("class")
+	project := projectOf(r)
 	id, ok := parseID(w, r)
 	if !ok {
 		return
 	}
-	stored, found, err := s.engine.GetObject(class, id)
+	stored, found, err := s.engine.GetObject(project, class, id)
 	if err != nil {
 		writeEngineError(w, err)
 		return
@@ -105,6 +109,7 @@ func (s *Server) handleGetObject(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handlePutObject(w http.ResponseWriter, r *http.Request) {
 	class := r.PathValue("class")
+	project := projectOf(r)
 	id, ok := parseID(w, r)
 	if !ok {
 		return
@@ -119,7 +124,7 @@ func (s *Server) handlePutObject(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "body must be a JSON object: "+err.Error())
 		return
 	}
-	if err := s.engine.PutObject(class, id, stored); err != nil {
+	if err := s.engine.PutObject(project, class, id, stored); err != nil {
 		writeEngineError(w, err)
 		return
 	}
@@ -133,11 +138,12 @@ func (s *Server) handlePutObject(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleDeleteObject(w http.ResponseWriter, r *http.Request) {
 	class := r.PathValue("class")
+	project := projectOf(r)
 	id, ok := parseID(w, r)
 	if !ok {
 		return
 	}
-	if err := s.engine.DeleteObject(class, id); err != nil {
+	if err := s.engine.DeleteObject(project, class, id); err != nil {
 		writeEngineError(w, err)
 		return
 	}
@@ -146,6 +152,7 @@ func (s *Server) handleDeleteObject(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleListObjects(w http.ResponseWriter, r *http.Request) {
 	class := r.PathValue("class")
+	project := projectOf(r)
 	q := r.URL.Query()
 	limit := parseIntDefault(q.Get("limit"), 100)
 	offset := parseIntDefault(q.Get("offset"), 0)
@@ -160,7 +167,7 @@ func (s *Server) handleListObjects(w http.ResponseWriter, r *http.Request) {
 		match = m.match
 	}
 
-	objs, err := s.engine.QueryObjects(class, match, limit, offset)
+	objs, err := s.engine.QueryObjects(project, class, match, limit, offset)
 	if err != nil {
 		writeEngineError(w, err)
 		return
@@ -180,6 +187,15 @@ func (s *Server) handleListObjects(w http.ResponseWriter, r *http.Request) {
 		"limit":   limit,
 		"offset":  offset,
 	})
+}
+
+// projectHeader is the HTTP header carrying the virtual namespace ("project").
+// Absent or empty selects the default project, which uses the legacy key layout
+// (so pre-project clients keep working unchanged).
+const projectHeader = "X-Zado-Project"
+
+func projectOf(r *http.Request) string {
+	return strings.TrimSpace(r.Header.Get(projectHeader))
 }
 
 func parseID(w http.ResponseWriter, r *http.Request) (int64, bool) {

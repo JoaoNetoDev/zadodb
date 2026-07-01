@@ -74,7 +74,7 @@ func mustGet(t *testing.T, mapped *mvcc.MappedFile, class string, id int64) (str
 	t.Helper()
 	snap := mapped.Acquire()
 	defer snap.Release()
-	v, found, err := snap.Get(wal.ObjectKey(class, id))
+	v, found, err := snap.Get(wal.ObjectKey("", class, id))
 	if err != nil {
 		t.Fatalf("Get: %v", err)
 	}

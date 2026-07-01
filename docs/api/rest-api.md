@@ -10,6 +10,45 @@ Base URL padrão: `http://127.0.0.1:7373`
 > flutuante e re-serializados; inteiros voltam como inteiros quando possível.
 > Isso é adequado ao MVP.
 
+## Projects (namespace virtual)
+
+Um **project** é um banco de dados virtual: um namespace que agrupa um conjunto
+de classes, permitindo trabalhar com conjuntos separados sem misturá-los. A
+mesma classe (ex.: `Rua`) pode existir de forma independente em vários projects,
+cada um com seus próprios objetos e sua própria sequência de ids.
+
+O project é selecionado pelo header **`X-Zado-Project`** em **qualquer** rota de
+classes/objetos. As rotas não mudam — só o header:
+
+```
+X-Zado-Project: censo2022
+```
+
+- **Header ausente ou vazio ⇒ project padrão** (`""`). O project padrão usa o
+  layout de chave legado, então um banco criado antes deste recurso continua
+  funcionando sem migração e sem nenhum header.
+- Nomes de project seguem a mesma regra de nomes de classe
+  (`[A-Za-z0-9_.-]`, 1–128 chars).
+- O isolamento vale para todas as operações: criar/listar/remover classe,
+  CRUD de objeto, bulk e filtros de consulta.
+
+### `GET /v1/projects` — lista os projects que possuem classes
+```json
+200 { "projects": ["", "censo2020", "censo2022"] }
+```
+O project padrão aparece como `""` quando tem ao menos uma classe.
+
+Exemplo — criar a classe `Rua` no project `censo2022` e inserir um objeto:
+```sh
+curl -X POST http://127.0.0.1:7373/v1/classes \
+  -H 'X-Zado-Project: censo2022' -H 'Content-Type: application/json' \
+  -d '{"name":"Rua"}'
+
+curl -X POST http://127.0.0.1:7373/v1/classes/Rua/objects \
+  -H 'X-Zado-Project: censo2022' -H 'Content-Type: application/json' \
+  -d '{"nome":"Rua das Flores"}'
+```
+
 ## Saúde e métricas
 
 ### `GET /v1/health`

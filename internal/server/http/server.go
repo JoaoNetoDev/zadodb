@@ -36,6 +36,8 @@ func (s *Server) routes() http.Handler {
 	mux.HandleFunc("GET /v1/health", s.handleHealth)
 	mux.HandleFunc("GET /v1/stats", s.handleStats)
 
+	mux.HandleFunc("GET /v1/projects", s.handleListProjects)
+
 	mux.HandleFunc("POST /v1/classes", s.handleCreateClass)
 	mux.HandleFunc("GET /v1/classes", s.handleListClasses)
 	mux.HandleFunc("GET /v1/classes/{class}", s.handleGetClass)
