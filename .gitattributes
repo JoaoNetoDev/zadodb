@@ -1,0 +1,9 @@
+# Normalize line endings to LF for all text; Go tooling and CI expect LF.
+* text=auto eol=lf
+
+# Binary / generated assets: leave untouched.
+*.png binary
+*.jpg binary
+*.gif binary
+*.zdb binary
+*.wal binary
