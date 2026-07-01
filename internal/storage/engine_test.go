@@ -191,6 +191,81 @@ func TestEnginePersistenceViaWAL(t *testing.T) {
 	}
 }
 
+func TestEngineCreateObjectsBulk(t *testing.T) {
+	dir := t.TempDir()
+	e, err := Open(Config{Dir: dir})
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	e.CreateClass("Item")
+
+	datas := make([][]byte, 500)
+	for i := range datas {
+		datas[i] = []byte(fmt.Sprintf("v%d", i))
+	}
+	ids, err := e.CreateObjectsBulk("Item", datas)
+	if err != nil {
+		t.Fatalf("CreateObjectsBulk: %v", err)
+	}
+	if len(ids) != 500 {
+		t.Fatalf("got %d ids, want 500", len(ids))
+	}
+	// Ids are sequential and unique.
+	for i, id := range ids {
+		if id != int64(i+1) {
+			t.Fatalf("ids[%d] = %d, want %d", i, id, i+1)
+		}
+	}
+	// Read-after-write from the overlay.
+	got, found, _ := e.GetObject("Item", 250)
+	if !found || string(got) != "v249" {
+		t.Fatalf("GetObject 250 = (%q,%v), want v249", got, found)
+	}
+	// Empty bulk is a no-op.
+	if ids, err := e.CreateObjectsBulk("Item", nil); err != nil || len(ids) != 0 {
+		t.Fatalf("empty bulk = (%v,%v)", ids, err)
+	}
+	// Bulk on missing class errors.
+	if _, err := e.CreateObjectsBulk("Ghost", [][]byte{[]byte("x")}); !errors.Is(err, ErrNoClass) {
+		t.Fatalf("bulk missing class = %v, want ErrNoClass", err)
+	}
+
+	// Persist across restart: the whole batch is durable via WAL replay.
+	e.Close()
+	e2, err := Open(Config{Dir: dir})
+	if err != nil {
+		t.Fatalf("reopen: %v", err)
+	}
+	defer e2.Close()
+	all, _ := e2.ListObjects("Item", 0, 0)
+	if len(all) != 500 {
+		t.Fatalf("after restart: %d objects, want 500", len(all))
+	}
+	// Next id continues past the batch.
+	if id, _ := e2.CreateObject("Item", []byte("next")); id != 501 {
+		t.Fatalf("next id after restart = %d, want 501", id)
+	}
+}
+
+func TestEngineBulkAtomicViaCheckpoint(t *testing.T) {
+	dir := t.TempDir()
+	e, _ := Open(Config{Dir: dir})
+	e.CreateClass("Item")
+	datas := [][]byte{[]byte("a"), []byte("b"), []byte("c")}
+	e.CreateObjectsBulk("Item", datas)
+	// Checkpoint folds the single batch record; all three must survive.
+	if err := e.Checkpoint(); err != nil {
+		t.Fatalf("Checkpoint: %v", err)
+	}
+	e.Close()
+
+	e2 := openEngine(t, dir)
+	all, _ := e2.ListObjects("Item", 0, 0)
+	if len(all) != 3 {
+		t.Fatalf("after checkpoint+restart: %d objects, want 3", len(all))
+	}
+}
+
 // TestEngineConcurrentWriters exercises many writers on the same and different
 // classes at once, checking for deadlock (timeout guard) and correct counts.
 func TestEngineConcurrentWriters(t *testing.T) {

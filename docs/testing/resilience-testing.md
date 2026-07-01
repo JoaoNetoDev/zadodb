@@ -45,6 +45,16 @@ interrompido (ver [recovery-and-checkpoint](../architecture/recovery-and-checkpo
 Resultado local típico: **10.000+ escritas confirmadas sobrevivem a 20 kills
 brutais, nenhuma corrompida**.
 
+## Atomicidade do bulk sob kill (`TestBulkSIGKILLFuzz`)
+
+O mesmo harness, mas contra o endpoint `POST .../objects/bulk`. Cada lote é um
+**único registro no WAL** (um CRC, um fsync), então é atômico por construção. O
+teste verifica, após 15 ciclos de kill, que todo lote confirmado (201) está
+**inteiramente** presente — nunca parcial. Um lote parcialmente aplicado seria
+uma violação de atomicidade e falha o teste. Complementarmente,
+`TestRecoverBatchIsAllOrNothing` (determinístico) rasga um registro de lote no
+meio e confirma que o recovery descarta o lote **inteiro**, não um prefixo.
+
 ## Interpretando falhas
 
 - `N acknowledged writes missing` → uma escrita confirmada sumiu: violação de

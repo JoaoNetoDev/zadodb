@@ -82,6 +82,22 @@ Substitui um objeto **existente** (404 se não existe).
 ### `DELETE /v1/classes/{class}/objects/{id}` — remove objeto
 `204` em sucesso. `404` se não existe.
 
+### `POST /v1/classes/{class}/objects/bulk` — cria objetos em lote (atômico)
+Recebe um **array JSON** de objetos e os grava numa **única transação atômica**
+(um só registro no WAL, um só `fsync`). É a forma recomendada para ingestão
+pesada: elimina o round-trip HTTP por objeto e amortiza o fsync.
+```json
+// request (array)
+[ { "nome": "A" }, { "nome": "B" }, { "nome": "C" } ]
+// 201
+{ "ids": [1, 2, 3], "count": 3 }
+```
+Garantia de atomicidade: um `201` significa que **todos** os objetos estão
+duráveis. Se ocorrer erro ou crash sem `201`, o lote inteiro fica ausente
+(nunca parcial) — reenvie. Limite: 10.000 objetos por request (corpo até
+256 MiB). Erros: `404` classe não existe, `400` corpo não é array de objetos ou
+lote grande demais.
+
 ### `GET /v1/classes/{class}/objects?limit=&offset=` — lista objetos
 Ordenado por `id` crescente. `limit` padrão 100, `offset` padrão 0.
 ```json

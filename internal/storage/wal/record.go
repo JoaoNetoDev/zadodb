@@ -20,16 +20,33 @@ const (
 	OpDelete                        // delete an object
 	OpCreateClass                   // register a class
 	OpDropClass                     // drop a class
+	OpBatch                         // atomic batch: apply Sub entries all-or-nothing
 )
 
 // WALEntry is the logical mutation stored (msgpack-encoded) in a record's
 // payload. It is also the unit replayed during checkpoint and recovery.
+//
+// An OpBatch entry carries N sub-mutations in Sub. Because the whole batch is a
+// single WAL record (one CRC, one fsync), it is inherently atomic: recovery
+// either reads the complete record and applies all sub-entries, or the record
+// is torn and the entire batch is dropped — never a partial apply.
 type WALEntry struct {
-	Op        OpType `msgpack:"op"`
-	Class     string `msgpack:"class"`
-	ObjectID  int64  `msgpack:"id,omitempty"`
-	Data      []byte `msgpack:"data,omitempty"` // object payload (msgpack) for OpPut / class meta for OpCreateClass
-	Timestamp int64  `msgpack:"ts"`
+	Op        OpType     `msgpack:"op"`
+	Class     string     `msgpack:"class"`
+	ObjectID  int64      `msgpack:"id,omitempty"`
+	Data      []byte     `msgpack:"data,omitempty"` // object payload (msgpack) for OpPut / class meta for OpCreateClass
+	Timestamp int64      `msgpack:"ts"`
+	Sub       []WALEntry `msgpack:"sub,omitempty"` // sub-mutations for OpBatch
+}
+
+// Flatten returns the effective sub-mutations of an entry: an OpBatch expands to
+// its Sub entries; any other entry is itself. Used so apply/replay/overlay all
+// treat a batch as its constituent operations.
+func (e WALEntry) Flatten() []WALEntry {
+	if e.Op == OpBatch {
+		return e.Sub
+	}
+	return []WALEntry{e}
 }
 
 // Marshal encodes the entry to msgpack. Callers do this off the sequencer's

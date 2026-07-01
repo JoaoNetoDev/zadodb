@@ -197,10 +197,14 @@ func replayWAL(path string, skipUpTo uint64, gen *idgen.Generator) ([]ReplayedEn
 		if e != nil {
 			return nil, 0, 0, fmt.Errorf("recovery: decode entry tx %d: %w", txID, e)
 		}
-		if entry.Op == wal.OpPut && entry.ObjectID > 0 {
-			gen.Observe(entry.Class, entry.ObjectID)
+		// A batch expands into its sub-mutations, each carrying the batch's
+		// TxID so the overlay and its later pruning treat them as one unit.
+		for _, sub := range entry.Flatten() {
+			if sub.Op == wal.OpPut && sub.ObjectID > 0 {
+				gen.Observe(sub.Class, sub.ObjectID)
+			}
+			out = append(out, ReplayedEntry{TxID: txID, Entry: sub})
 		}
-		out = append(out, ReplayedEntry{TxID: txID, Entry: entry})
 	}
 	return out, maxTx, r.Offset(), nil
 }

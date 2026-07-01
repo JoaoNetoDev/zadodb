@@ -42,6 +42,7 @@ func (s *Server) routes() http.Handler {
 	mux.HandleFunc("DELETE /v1/classes/{class}", s.handleDeleteClass)
 
 	mux.HandleFunc("POST /v1/classes/{class}/objects", s.handleCreateObject)
+	mux.HandleFunc("POST /v1/classes/{class}/objects/bulk", s.handleCreateObjectsBulk)
 	mux.HandleFunc("GET /v1/classes/{class}/objects", s.handleListObjects)
 	mux.HandleFunc("GET /v1/classes/{class}/objects/{id}", s.handleGetObject)
 	mux.HandleFunc("PUT /v1/classes/{class}/objects/{id}", s.handlePutObject)

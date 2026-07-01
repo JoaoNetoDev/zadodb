@@ -3,6 +3,7 @@ package http
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
 	"io"
 	"log"
 	"net/http"
@@ -106,6 +107,57 @@ func TestHTTPCRUDFlow(t *testing.T) {
 	if resp.StatusCode != 404 {
 		t.Fatalf("get deleted = %d, want 404", resp.StatusCode)
 	}
+}
+
+func TestHTTPBulkInsert(t *testing.T) {
+	ts := newTestServer(t)
+	base := ts.URL
+
+	do(t, "POST", base+"/v1/classes", map[string]any{"name": "Item"})
+
+	// Bulk create via a JSON array.
+	items := make([]map[string]any, 300)
+	for i := range items {
+		items[i] = map[string]any{"n": i, "label": fmt.Sprintf("item-%d", i)}
+	}
+	b, _ := json.Marshal(items)
+	resp, err := http.Post(base+"/v1/classes/Item/objects/bulk", "application/json", bytes.NewReader(b))
+	if err != nil {
+		t.Fatalf("bulk post: %v", err)
+	}
+	var out struct {
+		IDs   []int64 `json:"ids"`
+		Count int     `json:"count"`
+	}
+	json.NewDecoder(resp.Body).Decode(&out)
+	resp.Body.Close()
+	if resp.StatusCode != 201 || out.Count != 300 || len(out.IDs) != 300 {
+		t.Fatalf("bulk = %d count=%d ids=%d", resp.StatusCode, out.Count, len(out.IDs))
+	}
+
+	// Verify a couple made it with correct payload.
+	_, m := do(t, "GET", fmt.Sprintf("%s/v1/classes/Item/objects/%d", base, out.IDs[100]), nil)
+	if int(m["n"].(float64)) != 100 || m["label"] != "item-100" {
+		t.Fatalf("object 101 = %v", m)
+	}
+
+	// List reflects all 300.
+	_, lm := do(t, "GET", base+"/v1/classes/Item/objects?limit=1000", nil)
+	if int(lm["count"].(float64)) != 300 {
+		t.Fatalf("list count = %v, want 300", lm["count"])
+	}
+
+	// Bulk on missing class -> 404; non-array body -> 400.
+	resp2, _ := http.Post(base+"/v1/classes/Ghost/objects/bulk", "application/json", bytes.NewReader(b))
+	if resp2.StatusCode != 404 {
+		t.Fatalf("bulk missing class = %d, want 404", resp2.StatusCode)
+	}
+	resp2.Body.Close()
+	resp3, _ := http.Post(base+"/v1/classes/Item/objects/bulk", "application/json", bytes.NewReader([]byte(`{"not":"array"}`)))
+	if resp3.StatusCode != 400 {
+		t.Fatalf("non-array bulk = %d, want 400", resp3.StatusCode)
+	}
+	resp3.Body.Close()
 }
 
 func TestHTTPErrorCases(t *testing.T) {

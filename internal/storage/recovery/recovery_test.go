@@ -226,6 +226,66 @@ func TestRecoverTruncatesTornTailThenAppendsCleanly(t *testing.T) {
 	}
 }
 
+// TestRecoverBatchIsAllOrNothing proves batch atomicity: a torn batch record is
+// dropped entirely on recovery, never applied partially.
+func TestRecoverBatchIsAllOrNothing(t *testing.T) {
+	dir := t.TempDir()
+	Recover(dir)
+	walPath := layout.WALFile(dir)
+
+	// A committed single put, then a batch of three.
+	goodOff := writeWAL(t, walPath, []wal.WALEntry{
+		{Op: wal.OpPut, Class: "A", ObjectID: 1, Data: []byte("solo")},
+	}, 1)
+	batch := wal.WALEntry{Op: wal.OpBatch, Sub: []wal.WALEntry{
+		{Op: wal.OpPut, Class: "A", ObjectID: 2, Data: []byte("b2")},
+		{Op: wal.OpPut, Class: "A", ObjectID: 3, Data: []byte("b3")},
+		{Op: wal.OpPut, Class: "A", ObjectID: 4, Data: []byte("b4")},
+	}}
+	writeWAL(t, walPath, []wal.WALEntry{batch}, 2)
+	// Tear the batch record mid-way (simulate a crash during its write).
+	if err := os.Truncate(walPath, goodOff+12); err != nil {
+		t.Fatalf("Truncate: %v", err)
+	}
+
+	res, err := Recover(dir)
+	if err != nil {
+		t.Fatalf("Recover: %v", err)
+	}
+	// Only the solo put survives; NONE of the batch's three entries applied.
+	if len(res.Replayed) != 1 {
+		t.Fatalf("replayed %d entries, want 1 (torn batch must be dropped whole)", len(res.Replayed))
+	}
+	if res.Replayed[0].Entry.ObjectID != 1 {
+		t.Fatalf("surviving entry id = %d, want 1", res.Replayed[0].Entry.ObjectID)
+	}
+}
+
+// TestRecoverCompleteBatchAppliesAll confirms a fully-written batch record
+// replays all its sub-entries.
+func TestRecoverCompleteBatchAppliesAll(t *testing.T) {
+	dir := t.TempDir()
+	Recover(dir)
+	walPath := layout.WALFile(dir)
+	batch := wal.WALEntry{Op: wal.OpBatch, Sub: []wal.WALEntry{
+		{Op: wal.OpPut, Class: "A", ObjectID: 1, Data: []byte("b1")},
+		{Op: wal.OpPut, Class: "A", ObjectID: 2, Data: []byte("b2")},
+	}}
+	writeWAL(t, walPath, []wal.WALEntry{batch}, 1)
+
+	res, err := Recover(dir)
+	if err != nil {
+		t.Fatalf("Recover: %v", err)
+	}
+	if len(res.Replayed) != 2 {
+		t.Fatalf("replayed %d, want 2 (whole batch)", len(res.Replayed))
+	}
+	// Generator reseeded from both ids.
+	if got := res.Gen.Next("A"); got != 3 {
+		t.Fatalf("next id = %d, want 3", got)
+	}
+}
+
 func assertGet(t *testing.T, dataPath, class string, id int64, want string) {
 	t.Helper()
 	mf, err := mvcc.Open(dataPath)

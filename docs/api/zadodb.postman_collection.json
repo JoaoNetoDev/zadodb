@@ -123,6 +123,26 @@
           ]
         },
         {
+          "name": "Create objects (bulk)",
+          "request": {
+            "method": "POST",
+            "header": [ { "key": "Content-Type", "value": "application/json" } ],
+            "body": { "mode": "raw", "raw": "[\n  { \"nome\": \"Ana\" },\n  { \"nome\": \"Bruno\" },\n  { \"nome\": \"Carla\" }\n]" },
+            "url": "{{baseUrl}}/v1/classes/{{className}}/objects/bulk"
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": { "type": "text/javascript", "exec": [
+                "pm.test('201 Created', () => pm.response.to.have.status(201));",
+                "const j = pm.response.json();",
+                "pm.test('returns ids', () => pm.expect(j.ids).to.be.an('array'));",
+                "pm.test('count matches', () => pm.expect(j.count).to.eql(j.ids.length));"
+              ] }
+            }
+          ]
+        },
+        {
           "name": "Get object",
           "request": { "method": "GET", "url": "{{baseUrl}}/v1/classes/{{className}}/objects/{{objectId}}" },
           "event": [

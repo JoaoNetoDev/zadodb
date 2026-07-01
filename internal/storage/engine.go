@@ -300,6 +300,49 @@ func (e *Engine) CreateObject(class string, data []byte) (int64, error) {
 	return id, nil
 }
 
+// CreateObjectsBulk atomically stores many objects in a single WAL record
+// (one fsync for the whole batch) and returns their assigned ids in order.
+//
+// Atomicity: the batch is one WAL record, so a crash either leaves the complete
+// record (all objects durable) or a torn record (none applied) — never a
+// partial batch. A successful return means every object is durable; on error or
+// a crash without a successful return, the batch may be entirely absent (retry).
+func (e *Engine) CreateObjectsBulk(class string, datas [][]byte) ([]int64, error) {
+	if !e.ClassExists(class) {
+		return nil, ErrNoClass
+	}
+	if len(datas) == 0 {
+		return []int64{}, nil
+	}
+	ids := make([]int64, len(datas))
+	subs := make([]wal.WALEntry, len(datas))
+	ts := time.Now().UnixNano()
+	for i, d := range datas {
+		id := e.idgen.Next(class)
+		ids[i] = id
+		subs[i] = wal.WALEntry{Op: wal.OpPut, Class: class, ObjectID: id, Data: d, Timestamp: ts}
+	}
+
+	batch := wal.WALEntry{Op: wal.OpBatch, Timestamp: ts, Sub: subs}
+	payload, err := batch.Marshal() // marshaled off the sequencer's critical path
+	if err != nil {
+		return nil, err
+	}
+	txID, err := e.seq.Submit(payload)
+	if err != nil {
+		return nil, err
+	}
+
+	// Publish all sub-mutations to the overlay together, so readers see the
+	// whole batch atomically.
+	e.mu.Lock()
+	for i := range subs {
+		e.overlay[string(subs[i].Key())] = overlayVal{txID: txID, data: subs[i].Data}
+	}
+	e.mu.Unlock()
+	return ids, nil
+}
+
 // GetObject returns the object's data.
 func (e *Engine) GetObject(class string, id int64) ([]byte, bool, error) {
 	if !e.ClassExists(class) {
