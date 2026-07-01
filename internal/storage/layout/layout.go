@@ -20,11 +20,11 @@ import (
 )
 
 const (
-	dataPrefix = "data."
-	dataSuffix = ".zdb"
-	currentTmp = "CURRENT.tmp"
+	dataPrefix  = "data."
+	dataSuffix  = ".zdb"
+	currentTmp  = "CURRENT.tmp"
 	currentName = "CURRENT"
-	walName    = "wal.log"
+	walName     = "wal.log"
 )
 
 // DataFile returns the path of the data file for a generation.
