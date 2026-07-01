@@ -31,6 +31,10 @@ func (m Meta) encode(p *Page) {
 	p.SetPayloadLen(28)
 }
 
+// DecodeMeta reads a meta record from a meta page. Exposed so read paths (the
+// mmap snapshot) can learn the root without a Manager.
+func DecodeMeta(p *Page) (Meta, error) { return decodeMeta(p) }
+
 // decodeMeta reads a meta record from a page body.
 func decodeMeta(p *Page) (Meta, error) {
 	b := p.Body()
