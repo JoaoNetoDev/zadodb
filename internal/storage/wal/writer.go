@@ -35,6 +35,7 @@ var crcTable = crc32.MakeTable(crc32.Castagnoli)
 // use; only the Sequencer writes to it.
 type Writer struct {
 	f      *os.File
+	path   string
 	offset int64
 }
 
@@ -49,8 +50,11 @@ func OpenWriter(path string) (*Writer, error) {
 		f.Close()
 		return nil, fmt.Errorf("wal: stat %s: %w", path, err)
 	}
-	return &Writer{f: f, offset: info.Size()}, nil
+	return &Writer{f: f, path: path, offset: info.Size()}, nil
 }
+
+// Path returns the WAL file path.
+func (w *Writer) Path() string { return w.path }
 
 // Append writes a single framed record. It does not fsync; the Sequencer
 // batches fsyncs according to the configured mode.

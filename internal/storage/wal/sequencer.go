@@ -2,6 +2,8 @@ package wal
 
 import (
 	"errors"
+	"fmt"
+	"os"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -21,12 +23,18 @@ type Sequencer struct {
 	w    *Writer
 	mode FsyncMode
 	reqs chan *request
+	rot  chan *rotateReq
 
 	nextTx atomic.Uint64 // last assigned TxID (for stats / reads)
 
 	closeOnce sync.Once
 	done      chan struct{}
 	wg        sync.WaitGroup
+}
+
+type rotateReq struct {
+	retiredPath string
+	done        chan error
 }
 
 type request struct {
@@ -50,6 +58,7 @@ func NewSequencer(w *Writer, mode FsyncMode, initialTxID uint64, queue int) *Seq
 		w:    w,
 		mode: mode,
 		reqs: make(chan *request, queue),
+		rot:  make(chan *rotateReq),
 		done: make(chan struct{}),
 	}
 	s.nextTx.Store(initialTxID)
@@ -77,6 +86,46 @@ func (s *Sequencer) Submit(payload []byte) (uint64, error) {
 	return res.txID, res.err
 }
 
+// Rotate cuts the WAL at a clean record boundary: the current log is fsynced
+// and renamed to retiredPath, and a fresh empty log is opened at the original
+// path. Records already written are now entirely in retiredPath; all subsequent
+// submissions go to the fresh log. TxIDs continue monotonically across the cut.
+//
+// This is how a checkpoint captures exactly the set of records to fold into a
+// new data generation without racing concurrent writers.
+func (s *Sequencer) Rotate(retiredPath string) error {
+	req := &rotateReq{retiredPath: retiredPath, done: make(chan error, 1)}
+	select {
+	case s.rot <- req:
+	case <-s.done:
+		return ErrClosed
+	}
+	return <-req.done
+}
+
+func (s *Sequencer) doRotate(req *rotateReq) {
+	if err := s.w.Sync(); err != nil {
+		req.done <- err
+		return
+	}
+	active := s.w.Path()
+	if err := s.w.Close(); err != nil {
+		req.done <- err
+		return
+	}
+	if err := os.Rename(active, req.retiredPath); err != nil {
+		req.done <- fmt.Errorf("wal: rotate rename: %w", err)
+		return
+	}
+	nw, err := OpenWriter(active)
+	if err != nil {
+		req.done <- fmt.Errorf("wal: rotate reopen: %w", err)
+		return
+	}
+	s.w = nw
+	req.done <- nil
+}
+
 // Close stops the sequencer and closes the underlying writer. In-flight and
 // queued submissions receive ErrClosed.
 func (s *Sequencer) Close() error {
@@ -92,6 +141,9 @@ func (s *Sequencer) run() {
 		var first *request
 		select {
 		case first = <-s.reqs:
+		case req := <-s.rot:
+			s.doRotate(req)
+			continue
 		case <-s.done:
 			s.drainClosed()
 			return
