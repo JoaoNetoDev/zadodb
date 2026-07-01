@@ -83,6 +83,23 @@ func ObjectPrefix(class string) []byte {
 	return k
 }
 
+// DecodeObjectKey parses an object key back into its class and id. ok is false
+// for keys that are not object keys (e.g. class-definition keys). Used at boot
+// to reseed the id generator from the data already on disk.
+func DecodeObjectKey(key []byte) (class string, id int64, ok bool) {
+	// [nsObject] + class + [keySep] + id(8)
+	if len(key) < 1+1+8 || key[0] != nsObject {
+		return "", 0, false
+	}
+	sepPos := len(key) - 9
+	if key[sepPos] != keySep {
+		return "", 0, false
+	}
+	class = string(key[1:sepPos])
+	id = int64(binary.BigEndian.Uint64(key[sepPos+1:]))
+	return class, id, true
+}
+
 // Key returns the B+Tree key this entry mutates.
 func (e WALEntry) Key() []byte {
 	switch e.Op {
