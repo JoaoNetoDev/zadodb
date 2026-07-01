@@ -78,7 +78,7 @@ func Recover(dir string) (*Result, error) {
 	retired := filepath.Join(dir, checkpoint.RetiredWALName)
 	if fileExists(retired) {
 		newGen := curGen + 1
-		if err := checkpoint.BuildGeneration(dir, curGen, newGen, retired); err != nil {
+		if _, err := checkpoint.BuildGeneration(dir, curGen, newGen, retired); err != nil {
 			return nil, fmt.Errorf("recovery: complete interrupted checkpoint: %w", err)
 		}
 		if err := os.Remove(retired); err != nil {

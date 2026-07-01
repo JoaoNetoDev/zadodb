@@ -32,34 +32,36 @@ import (
 	"github.com/JoaoNetoDev/zadodb/internal/storage/wal"
 )
 
-// Run performs one checkpoint and returns the new generation number. seq is the
+// Run performs one checkpoint and returns the new generation number and the
+// highest TxID folded into it (so the engine can prune its overlay). seq is the
 // live sequencer (whose WAL is rotated); mapped is the read snapshot to swap.
-func Run(dir string, seq *wal.Sequencer, mapped *mvcc.MappedFile) (uint64, error) {
+func Run(dir string, seq *wal.Sequencer, mapped *mvcc.MappedFile) (newGen, foldedTxID uint64, err error) {
 	curGen, err := layout.ReadCurrent(dir)
 	if err != nil {
-		return 0, fmt.Errorf("checkpoint: read CURRENT: %w", err)
+		return 0, 0, fmt.Errorf("checkpoint: read CURRENT: %w", err)
 	}
-	newGen := curGen + 1
+	newGen = curGen + 1
 	retired := filepath.Join(dir, RetiredWALName)
 
 	// 1. Cut the WAL. Everything to fold in is now in retired.
 	if err := seq.Rotate(retired); err != nil {
-		return 0, fmt.Errorf("checkpoint: rotate wal: %w", err)
+		return 0, 0, fmt.Errorf("checkpoint: rotate wal: %w", err)
 	}
 
 	// 2-4. Build + publish + switch CURRENT to the new generation.
-	if err := BuildGeneration(dir, curGen, newGen, retired); err != nil {
-		return 0, err
+	foldedTxID, err = BuildGeneration(dir, curGen, newGen, retired)
+	if err != nil {
+		return 0, 0, err
 	}
 
 	// 5. Point readers at the new generation, then drop the retired WAL.
 	if err := mapped.SwapTo(layout.DataFile(dir, newGen)); err != nil {
-		return 0, err
+		return 0, 0, err
 	}
 	_ = os.Remove(retired)
 
 	cleanupOldGenerations(dir, newGen)
-	return newGen, nil
+	return newGen, foldedTxID, nil
 }
 
 // RetiredWALName is the fixed name of the WAL segment being folded by a
@@ -68,43 +70,46 @@ func Run(dir string, seq *wal.Sequencer, mapped *mvcc.MappedFile) (uint64, error
 const RetiredWALName = "wal.applying.log"
 
 // BuildGeneration constructs data.<newGen> from data.<baseGen> plus the records
-// in retiredWAL, then atomically publishes it and points CURRENT at it. It does
-// not touch the live sequencer or read snapshot, so recovery can reuse it to
-// finish an interrupted checkpoint at boot.
-func BuildGeneration(dir string, baseGen, newGen uint64, retiredWAL string) error {
+// in retiredWAL, then atomically publishes it and points CURRENT at it. It
+// returns the highest TxID folded in. It does not touch the live sequencer or
+// read snapshot, so recovery can reuse it to finish an interrupted checkpoint.
+func BuildGeneration(dir string, baseGen, newGen uint64, retiredWAL string) (uint64, error) {
 	base := layout.DataFile(dir, baseGen)
 	newTmp := layout.DataFile(dir, newGen) + ".tmp"
 	if err := copyFile(base, newTmp); err != nil {
-		return fmt.Errorf("checkpoint: copy base: %w", err)
+		return 0, fmt.Errorf("checkpoint: copy base: %w", err)
 	}
 	lastApplied, root, npages, err := foldWAL(newTmp, retiredWAL)
 	if err != nil {
-		return err
+		return 0, err
 	}
 
 	mgr, err := page.Open(newTmp)
 	if err != nil {
-		return err
+		return 0, err
 	}
 	if err := mgr.WriteMeta(page.Meta{Root: root, LastAppliedTxID: lastApplied, NumPages: npages}); err != nil {
 		mgr.Close()
-		return err
+		return 0, err
 	}
 	if err := mgr.Sync(); err != nil {
 		mgr.Close()
-		return err
+		return 0, err
 	}
 	mgr.Close()
 
 	finalData := layout.DataFile(dir, newGen)
 	if err := os.Rename(newTmp, finalData); err != nil {
-		return fmt.Errorf("checkpoint: publish generation: %w", err)
+		return 0, fmt.Errorf("checkpoint: publish generation: %w", err)
 	}
 	if err := layout.FsyncDir(dir); err != nil {
-		return err
+		return 0, err
 	}
 	// The atomic point at which the new generation becomes the truth.
-	return layout.WriteCurrent(dir, newGen)
+	if err := layout.WriteCurrent(dir, newGen); err != nil {
+		return 0, err
+	}
+	return lastApplied, nil
 }
 
 // foldWAL opens the temp data file, applies every retired WAL record with a

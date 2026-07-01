@@ -88,7 +88,7 @@ func TestCheckpointFoldsWAL(t *testing.T) {
 	put(t, seq, "Pessoa", 2, "bob")
 	put(t, seq, "Filial", 1, "matriz")
 
-	gen, err := Run(dir, seq, mapped)
+	gen, _, err := Run(dir, seq, mapped)
 	if err != nil {
 		t.Fatalf("checkpoint Run: %v", err)
 	}
@@ -128,7 +128,7 @@ func TestCheckpointAccumulatesAndDeletes(t *testing.T) {
 	dir, seq, mapped := newDB(t)
 
 	put(t, seq, "Pessoa", 1, "alice")
-	if _, err := Run(dir, seq, mapped); err != nil {
+	if _, _, err := Run(dir, seq, mapped); err != nil {
 		t.Fatalf("checkpoint 1: %v", err)
 	}
 
@@ -137,7 +137,7 @@ func TestCheckpointAccumulatesAndDeletes(t *testing.T) {
 	put(t, seq, "Pessoa", 1, "alice-v2") // update
 	del(t, seq, "Pessoa", 2)             // delete what we just added
 
-	gen, err := Run(dir, seq, mapped)
+	gen, _, err := Run(dir, seq, mapped)
 	if err != nil {
 		t.Fatalf("checkpoint 2: %v", err)
 	}
@@ -156,7 +156,7 @@ func TestCheckpointAccumulatesAndDeletes(t *testing.T) {
 func TestCheckpointEmptyWAL(t *testing.T) {
 	// Checkpointing with no pending writes must still succeed and advance.
 	dir, seq, mapped := newDB(t)
-	gen, err := Run(dir, seq, mapped)
+	gen, _, err := Run(dir, seq, mapped)
 	if err != nil {
 		t.Fatalf("checkpoint empty: %v", err)
 	}

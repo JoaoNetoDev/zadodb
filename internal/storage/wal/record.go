@@ -100,6 +100,15 @@ func DecodeObjectKey(key []byte) (class string, id int64, ok bool) {
 	return class, id, true
 }
 
+// DecodeClassKey parses a class-definition key back into its class name. ok is
+// false for keys that are not class keys.
+func DecodeClassKey(key []byte) (class string, ok bool) {
+	if len(key) < 1 || key[0] != nsClass {
+		return "", false
+	}
+	return string(key[1:]), true
+}
+
 // Key returns the B+Tree key this entry mutates.
 func (e WALEntry) Key() []byte {
 	switch e.Op {
