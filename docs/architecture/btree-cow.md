@@ -45,13 +45,21 @@ checkpoint. `TestOverflowLargeValue` cobre valores multi-página (20KB).
 (read-only), o que permite reaproveitá-las tanto no lado de escrita quanto no
 snapshot mmap.
 
+## Bulk builder (compactação)
+
+Além do caminho COW (usado nas escritas online), o pacote expõe um **bulk
+builder** (`btree.Builder`) que carrega uma B+Tree compacta a partir de chaves
+em ordem crescente: folhas empacotadas quase cheias e níveis internos montados
+de baixo para cima. O resultado **não tem órfãos** — seu tamanho é proporcional
+aos dados vivos. O checkpoint usa isso para compactar (ver
+[recovery-and-checkpoint](recovery-and-checkpoint.md)); medido em ~70× menor que
+a sequência COW equivalente. A memória é limitada a uma folha + o índice por
+nível (`firstKey`, `pageID`), não ao dataset inteiro.
+
 ## Limitações conhecidas (fase futura)
 
-- **Delete não faz merge/rebalance** de nós: a entrada é removida (COW), nós
-  podem ficar sub-ocupados, e o espaço é recuperado na próxima geração (que é
-  reescrita). Isso mantém o delete simples e as buscas sempre corretas.
-- **Sem compactação incremental**: um checkpoint copia a geração base e aplica
-  os deltas; páginas órfãs acumulam até... na prática cada geração é um arquivo
-  novo, então o crescimento é limitado, mas não há compactação que elimine nós
-  vazios de dentro de uma árvore existente. Índices secundários e compactação
-  são itens de fase futura.
+- **Delete online não faz merge/rebalance** de nós: a entrada é removida (COW),
+  nós podem ficar sub-ocupados até o próximo checkpoint, que **reconstrói a
+  árvore compacta** e elimina o espaço morto. Mantém o delete simples e as
+  buscas sempre corretas.
+- **Sem índices secundários**: consultas por campo são full scan (fase futura).
