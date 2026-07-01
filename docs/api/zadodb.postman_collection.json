@@ -1,0 +1,183 @@
+{
+  "info": {
+    "name": "ZadoDB",
+    "description": "Collection para a API REST do ZadoDB. Serve como cliente de referência para qualquer linguagem. O request 'Create object' captura o id em {{objectId}} para os requests seguintes.",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+  },
+  "variable": [
+    { "key": "baseUrl", "value": "http://127.0.0.1:7373" },
+    { "key": "className", "value": "Pessoa" },
+    { "key": "objectId", "value": "1" }
+  ],
+  "item": [
+    {
+      "name": "Health & Stats",
+      "item": [
+        {
+          "name": "Health",
+          "request": { "method": "GET", "url": "{{baseUrl}}/v1/health" },
+          "event": [
+            {
+              "listen": "test",
+              "script": { "type": "text/javascript", "exec": [
+                "pm.test('200 OK', () => pm.response.to.have.status(200));",
+                "pm.test('status ok', () => pm.expect(pm.response.json().status).to.eql('ok'));"
+              ] }
+            }
+          ]
+        },
+        {
+          "name": "Stats",
+          "request": { "method": "GET", "url": "{{baseUrl}}/v1/stats" },
+          "event": [
+            {
+              "listen": "test",
+              "script": { "type": "text/javascript", "exec": [
+                "pm.test('200 OK', () => pm.response.to.have.status(200));"
+              ] }
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "Classes",
+      "item": [
+        {
+          "name": "Create class",
+          "request": {
+            "method": "POST",
+            "header": [ { "key": "Content-Type", "value": "application/json" } ],
+            "body": { "mode": "raw", "raw": "{\n  \"name\": \"{{className}}\"\n}" },
+            "url": "{{baseUrl}}/v1/classes"
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": { "type": "text/javascript", "exec": [
+                "pm.test('created or exists', () => pm.expect([201,409]).to.include(pm.response.code));"
+              ] }
+            }
+          ]
+        },
+        {
+          "name": "List classes",
+          "request": { "method": "GET", "url": "{{baseUrl}}/v1/classes" },
+          "event": [
+            {
+              "listen": "test",
+              "script": { "type": "text/javascript", "exec": [
+                "pm.test('200 OK', () => pm.response.to.have.status(200));",
+                "pm.test('has classes array', () => pm.expect(pm.response.json().classes).to.be.an('array'));"
+              ] }
+            }
+          ]
+        },
+        {
+          "name": "Get class",
+          "request": { "method": "GET", "url": "{{baseUrl}}/v1/classes/{{className}}" },
+          "event": [
+            {
+              "listen": "test",
+              "script": { "type": "text/javascript", "exec": [
+                "pm.test('200 OK', () => pm.response.to.have.status(200));"
+              ] }
+            }
+          ]
+        },
+        {
+          "name": "Delete class (if empty)",
+          "request": { "method": "DELETE", "url": "{{baseUrl}}/v1/classes/{{className}}" },
+          "event": [
+            {
+              "listen": "test",
+              "script": { "type": "text/javascript", "exec": [
+                "pm.test('204 or 409', () => pm.expect([204,409,404]).to.include(pm.response.code));"
+              ] }
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "Objects",
+      "item": [
+        {
+          "name": "Create object",
+          "request": {
+            "method": "POST",
+            "header": [ { "key": "Content-Type", "value": "application/json" } ],
+            "body": { "mode": "raw", "raw": "{\n  \"nome\": \"João\",\n  \"idade\": 30\n}" },
+            "url": "{{baseUrl}}/v1/classes/{{className}}/objects"
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": { "type": "text/javascript", "exec": [
+                "pm.test('201 Created', () => pm.response.to.have.status(201));",
+                "const id = pm.response.json().id;",
+                "pm.expect(id).to.be.a('number');",
+                "pm.collectionVariables.set('objectId', id);"
+              ] }
+            }
+          ]
+        },
+        {
+          "name": "Get object",
+          "request": { "method": "GET", "url": "{{baseUrl}}/v1/classes/{{className}}/objects/{{objectId}}" },
+          "event": [
+            {
+              "listen": "test",
+              "script": { "type": "text/javascript", "exec": [
+                "pm.test('200 OK', () => pm.response.to.have.status(200));",
+                "pm.test('id matches', () => pm.expect(String(pm.response.json().id)).to.eql(pm.collectionVariables.get('objectId')));"
+              ] }
+            }
+          ]
+        },
+        {
+          "name": "Update object",
+          "request": {
+            "method": "PUT",
+            "header": [ { "key": "Content-Type", "value": "application/json" } ],
+            "body": { "mode": "raw", "raw": "{\n  \"nome\": \"João Neto\",\n  \"idade\": 31\n}" },
+            "url": "{{baseUrl}}/v1/classes/{{className}}/objects/{{objectId}}"
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": { "type": "text/javascript", "exec": [
+                "pm.test('200 OK', () => pm.response.to.have.status(200));"
+              ] }
+            }
+          ]
+        },
+        {
+          "name": "List objects",
+          "request": { "method": "GET", "url": "{{baseUrl}}/v1/classes/{{className}}/objects?limit=100&offset=0" },
+          "event": [
+            {
+              "listen": "test",
+              "script": { "type": "text/javascript", "exec": [
+                "pm.test('200 OK', () => pm.response.to.have.status(200));",
+                "pm.test('has objects array', () => pm.expect(pm.response.json().objects).to.be.an('array'));"
+              ] }
+            }
+          ]
+        },
+        {
+          "name": "Delete object",
+          "request": { "method": "DELETE", "url": "{{baseUrl}}/v1/classes/{{className}}/objects/{{objectId}}" },
+          "event": [
+            {
+              "listen": "test",
+              "script": { "type": "text/javascript", "exec": [
+                "pm.test('204 No Content', () => pm.response.to.have.status(204));"
+              ] }
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}
