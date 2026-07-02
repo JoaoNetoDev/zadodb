@@ -200,6 +200,13 @@ func (s *Server) handleListObjects(w http.ResponseWriter, r *http.Request) {
 		}
 		out = append(out, obj)
 	}
+	// Embed related parent objects when requested: ?include=municipio,uf
+	if inc := parseCSV(q.Get("include")); len(inc) > 0 {
+		if err := s.attachIncludes(project, class, out, inc); err != nil {
+			writeError(w, http.StatusBadRequest, err.Error())
+			return
+		}
+	}
 	resp := map[string]any{
 		"objects": out,
 		"count":   len(out),
@@ -230,6 +237,22 @@ func parseID(w http.ResponseWriter, r *http.Request) (int64, bool) {
 		return 0, false
 	}
 	return id, true
+}
+
+// parseCSV splits a comma-separated query value, trimming spaces and dropping
+// empties (e.g. include=municipio,uf).
+func parseCSV(s string) []string {
+	if strings.TrimSpace(s) == "" {
+		return nil
+	}
+	parts := strings.Split(s, ",")
+	out := make([]string, 0, len(parts))
+	for _, p := range parts {
+		if p = strings.TrimSpace(p); p != "" {
+			out = append(out, p)
+		}
+	}
+	return out
 }
 
 func parseIntDefault(s string, def int) int {

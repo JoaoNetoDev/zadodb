@@ -96,6 +96,80 @@ func (s *Server) buildJoinPredicate(project, baseClass string, baseMatcher *matc
 	}, nil
 }
 
+// attachIncludes embeds related parent objects into each result row under the
+// relation's alias (e.g. ?include=municipio,uf adds row["municipio"] and
+// row["uf"]). It follows the same relationship path as the join filters, so
+// multi-hop parents (uf reached via municipio) resolve too. Related classes are
+// loaded once into a value->object map (they are small); each row then walks the
+// path via O(1) lookups. A row whose chain does not resolve gets a null.
+func (s *Server) attachIncludes(project, baseClass string, rows []map[string]any, includes []string) error {
+	if len(rows) == 0 {
+		return nil
+	}
+	plan := &joinPlan{engine: s.engine, project: project, edgesFrom: map[string][]edge{}, filtersFor: map[string]*matcher{}}
+
+	// lookups[class+0x00+remoteField] = map[fieldString(remoteField)] -> object
+	lookups := map[string]map[string]map[string]any{}
+	load := func(class, remoteField string) (map[string]map[string]any, error) {
+		ck := class + "\x00" + remoteField
+		if m, ok := lookups[ck]; ok {
+			return m, nil
+		}
+		objs, err := s.engine.QueryObjects(project, class, nil, 0, 0)
+		if err != nil {
+			return nil, err
+		}
+		m := make(map[string]map[string]any, len(objs))
+		for _, o := range objs {
+			obj, err := storedToObject(o.Data, o.ID)
+			if err != nil {
+				return nil, err
+			}
+			if v, ok := fieldString(obj[remoteField]); ok {
+				m[v] = obj
+			}
+		}
+		lookups[ck] = m
+		return m, nil
+	}
+
+	for _, alias := range includes {
+		path, err := plan.pathTo(baseClass, alias)
+		if err != nil {
+			return err
+		}
+		if len(path) == 0 {
+			continue
+		}
+		for _, e := range path { // preload each hop's target class
+			if _, err := load(e.rel.ToClass, e.rel.RemoteField); err != nil {
+				return err
+			}
+		}
+		for _, row := range rows {
+			cur := row
+			var final map[string]any
+			for _, e := range path {
+				key, ok := fieldString(cur[e.rel.LocalField])
+				if !ok {
+					final = nil
+					break
+				}
+				m, _ := load(e.rel.ToClass, e.rel.RemoteField)
+				parent, ok := m[key]
+				if !ok {
+					final = nil
+					break
+				}
+				final = parent
+				cur = parent
+			}
+			row[alias] = final // null if the chain did not resolve
+		}
+	}
+	return nil
+}
+
 // stripAlias returns copies of specs with the alias cleared, so they can be
 // compiled against the related class's own fields.
 func stripAlias(specs []filterSpec) []filterSpec {

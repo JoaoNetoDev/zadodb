@@ -321,6 +321,33 @@ Erros/limitações:
 - Se houver **múltiplas relações para a mesma classe destino**, a resolução usa a
   **primeira** encontrada.
 
+### Trazer os campos do pai (`include`)
+
+Os filtros de relação **filtram**, mas por padrão não trazem os dados do pai. Para
+**embutir** o objeto relacionado em cada linha do resultado, use
+`include=<rel>[,<rel>...]` (os mesmos nomes de relação dos filtros). Cada relação
+listada vira uma chave no objeto retornado, com o **objeto pai completo** (segue
+o caminho no grafo, então saltos múltiplos como `uf` via `municipio` também
+funcionam):
+
+```
+GET /v1/classes/logradouro/objects?eq.uf.sigla=RN&eq.municipio.nome=mossoro&include=municipio,uf&limit=1
+```
+```json
+{
+  "objects": [{
+    "id": 3234386, "nome": "ANTONIO IVO MARINHO", "municipioCodigo": 2408003,
+    "municipio": { "id": 5163, "nome": "Mossoró", "codigoIbge": 2408003, "codigoUf": 24 },
+    "uf":        { "id": 11, "nome": "Rio Grande do Norte", "sigla": "RN", "codigoUf": 24 }
+  }],
+  "count": 1
+}
+```
+
+As classes relacionadas são carregadas uma vez num mapa por chave (são pequenas);
+cada linha resolve o pai por lookup O(1). Se a cadeia de um registro não resolver
+(FK órfã), a chave do alias vem como `null`.
+
 Ver [architecture/joins](../architecture/joins.md) para o algoritmo.
 
 ## Checkpoint manual

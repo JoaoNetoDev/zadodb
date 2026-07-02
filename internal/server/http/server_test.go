@@ -186,6 +186,21 @@ func TestHTTPJoinAndFolding(t *testing.T) {
 	if resp, _ := do(t, "GET", base+"/v1/classes/logradouro/objects?eq.estado.x=1", nil); resp.StatusCode != 400 {
 		t.Errorf("unknown relation = %d, want 400", resp.StatusCode)
 	}
+
+	// include= embeds the related parent objects (multi-hop: uf via municipio).
+	resp, m := do(t, "GET", base+"/v1/classes/logradouro/objects?eq.uf.sigla=RN&like.municipio.nome=mossor%25&include=municipio,uf&limit=1", nil)
+	if resp.StatusCode != 200 || int(m["count"].(float64)) != 1 {
+		t.Fatalf("include query = %d count=%v", resp.StatusCode, m["count"])
+	}
+	row := m["objects"].([]any)[0].(map[string]any)
+	muni, ok := row["municipio"].(map[string]any)
+	if !ok || muni["nome"] != "Mossoró" {
+		t.Errorf("embedded municipio = %v, want nome Mossoró", row["municipio"])
+	}
+	uf, ok := row["uf"].(map[string]any)
+	if !ok || uf["sigla"] != "RN" {
+		t.Errorf("embedded uf = %v, want sigla RN", row["uf"])
+	}
 }
 
 func TestHTTPCRUDFlow(t *testing.T) {
