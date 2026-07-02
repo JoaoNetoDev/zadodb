@@ -373,6 +373,121 @@
               ] }
             }
           ]
+        },
+        {
+          "name": "Join + include (embute objetos pai)",
+          "request": {
+            "method": "GET",
+            "url": {
+              "raw": "{{baseUrl}}/v1/classes/logradouro/objects?eq.uf.sigla=RN&eq.municipio.nome=mossoro&include=municipio,uf&limit=5",
+              "host": [ "{{baseUrl}}" ],
+              "path": [ "v1", "classes", "logradouro", "objects" ],
+              "query": [
+                { "key": "eq.uf.sigla", "value": "RN" },
+                { "key": "eq.municipio.nome", "value": "mossoro", "description": "Folding default: casa 'Mossoró'." },
+                { "key": "include", "value": "municipio,uf", "description": "Embute o objeto pai completo em cada linha, sob a chave da relação (multi-salto: uf via municipio). FK órfã vira null." },
+                { "key": "limit", "value": "5" }
+              ]
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": { "type": "text/javascript", "exec": [
+                "pm.test('200 OK', () => pm.response.to.have.status(200));",
+                "const objs = pm.response.json().objects;",
+                "pm.test('embute municipio e uf', () => { if (objs.length) { pm.expect(objs[0]).to.have.property('municipio'); pm.expect(objs[0]).to.have.property('uf'); } });"
+              ] }
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "SQL (POST /v1/query)",
+      "description": "Consulta SQL num subconjunto padrão. Corpo `{\"sql\": \"SELECT ...\"}` (ou o texto SQL puro). Suporta SELECT com aliases e `*`, FROM [projeto.]classe, INNER/LEFT/RIGHT JOIN com equi-join `ON a.x = b.y`, WHERE (=, <>, !=, <, <=, >, >=, LIKE, NOT LIKE, IN, IS [NOT] NULL, AND/OR/NOT), ORDER BY, FIRST n / LIMIT n OFFSET m, COALESCE, CAST(... AS INT|FLOAT|STRING|BOOL|DATE), UPPER/LOWER. Strings comparam com folding de caixa/acento por padrão (desative com ?ci=false/?ai=false na URL). O project vem do header X-Zado-Project ou de FROM projeto.classe.",
+      "item": [
+        {
+          "name": "SELECT simples com LIKE",
+          "request": {
+            "method": "POST",
+            "header": [ { "key": "Content-Type", "value": "application/json" } ],
+            "url": "{{baseUrl}}/v1/query",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"sql\": \"SELECT id, nome FROM logradouro WHERE nome LIKE '%nio%ivo%' LIMIT 10\"\n}"
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": { "type": "text/javascript", "exec": [
+                "pm.test('200 OK', () => pm.response.to.have.status(200));",
+                "pm.test('has rows array', () => pm.expect(pm.response.json().rows).to.be.an('array'));"
+              ] }
+            }
+          ]
+        },
+        {
+          "name": "Two-hop JOIN + ORDER BY + folding",
+          "request": {
+            "method": "POST",
+            "header": [ { "key": "Content-Type", "value": "application/json" } ],
+            "url": "{{baseUrl}}/v1/query",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"sql\": \"SELECT l.nome, m.nome AS cidade, u.sigla AS uf FROM logradouro l JOIN municipio m ON l.municipioCodigo = m.codigoIbge JOIN uf u ON m.codigoUf = u.codigoUf WHERE u.sigla = 'RN' AND m.nome = 'mossoro' AND l.nome LIKE '%nio%ivo%' ORDER BY l.nome LIMIT 10\"\n}"
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": { "type": "text/javascript", "exec": [
+                "pm.test('200 OK', () => pm.response.to.have.status(200));",
+                "pm.test('projeta cidade e uf', () => { const r = pm.response.json().rows; if (r.length) { pm.expect(r[0]).to.have.property('cidade'); pm.expect(r[0]).to.have.property('uf'); } });"
+              ] }
+            }
+          ]
+        },
+        {
+          "name": "LEFT JOIN + COALESCE + IS NULL",
+          "request": {
+            "method": "POST",
+            "header": [ { "key": "Content-Type", "value": "application/json" } ],
+            "url": "{{baseUrl}}/v1/query",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"sql\": \"SELECT l.nome, COALESCE(m.nome, 'sem cidade') AS cidade FROM logradouro l LEFT JOIN municipio m ON l.municipioCodigo = m.codigoIbge WHERE m.codigoIbge IS NULL LIMIT 20\"\n}"
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": { "type": "text/javascript", "exec": [
+                "pm.test('200 OK', () => pm.response.to.have.status(200));"
+              ] }
+            }
+          ]
+        },
+        {
+          "name": "CAST + IN + comparação tipada",
+          "request": {
+            "method": "POST",
+            "header": [ { "key": "Content-Type", "value": "application/json" } ],
+            "url": "{{baseUrl}}/v1/query",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"sql\": \"SELECT sigla, CAST(codigoUf AS STRING) AS cod FROM uf WHERE codigoUf IN (24, 35) ORDER BY sigla\"\n}"
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": { "type": "text/javascript", "exec": [
+                "pm.test('200 OK', () => pm.response.to.have.status(200));"
+              ] }
+            }
+          ]
         }
       ]
     },
