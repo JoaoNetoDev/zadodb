@@ -350,6 +350,66 @@ cada linha resolve o pai por lookup O(1). Se a cadeia de um registro não resolv
 
 Ver [architecture/joins](../architecture/joins.md) para o algoritmo.
 
+## Consulta SQL (`POST /v1/query`)
+
+Além dos filtros de URL, um subconjunto de SQL padrão é aceito em
+`POST /v1/query`. O corpo pode ser `{"sql": "SELECT ..."}` (JSON) ou o texto SQL
+puro. O project vem do header `X-Zado-Project`, ou pode ser qualificado por
+tabela (`FROM projeto.classe`).
+
+Gramática suportada:
+
+```sql
+SELECT [FIRST n] * | expr [AS nome] [, ...]
+FROM [projeto.]classe [[AS] alias]
+[ [INNER|LEFT|RIGHT] JOIN [projeto.]classe [[AS] alias] ON a.x = b.y ]...
+[ WHERE expr ]            -- AND/OR/NOT, = <> != < <= > >=, LIKE, NOT LIKE,
+                          -- IN (...), IS [NOT] NULL
+[ ORDER BY expr [ASC|DESC] [, ...] ]
+[ LIMIT n [OFFSET m] ]    -- sem LIMIT, o padrão é 100 linhas
+```
+
+Expressões incluem `COALESCE(a, b, ...)`, `CAST(expr AS INT|FLOAT|STRING|BOOL|DATE)`,
+`UPPER`/`LOWER`, literais (`'texto'`, `123`, `TRUE`, `NULL`) e colunas
+(`campo` ou `alias.campo`). Strings comparam com folding de caixa e acento por
+padrão (`'mossoro' = 'Mossoró'`); desative com `?ci=false` / `?ai=false` na URL.
+Comparações são tipadas: números comparam numericamente (mesmo se um lado for
+string numérica), datas cronologicamente (ISO 8601 ou `dd/mm/aaaa`; force com
+`CAST(... AS DATE)`), o resto como texto folded.
+
+```
+POST /v1/query
+{"sql": "SELECT l.nome, m.nome AS cidade, u.sigla AS uf
+         FROM logradouro l
+         JOIN municipio m ON l.municipioCodigo = m.codigoIbge
+         JOIN uf u ON m.codigoUf = u.codigoUf
+         WHERE u.sigla = 'RN' AND m.nome = 'mossoro' AND l.nome LIKE '%nio%ivo%'
+         ORDER BY l.nome
+         LIMIT 10"}
+```
+```json
+{"rows": [{"nome": "ANTONIO IVO MARINHO", "cidade": "Mossoró", "uf": "RN"}], "count": 1}
+```
+
+Execução (sem índice secundário ainda):
+
+- A classe do `FROM` é varrida em **streaming** por páginas keyset (memória de
+  pico = página + overlay, mesmo com milhões de linhas).
+- Conjuntos do `WHERE` que só tocam a classe base são **empurrados para o scan**
+  (pushdown), descartando linhas antes de qualquer trabalho de join.
+- Cada `JOIN` deve ser uma **equi-join** (`ON a.x = b.y`); a classe do join é
+  carregada uma vez num hash map e cada linha da base resolve em O(1).
+  `LEFT JOIN` preenche com `NULL` quando não casa; `RIGHT JOIN` emite ao final
+  as linhas do lado direito que nunca casaram.
+- Sem `ORDER BY`/`RIGHT JOIN`, o scan **para** assim que `OFFSET+LIMIT` linhas
+  foram produzidas. Com `ORDER BY`, as linhas que casam são coletadas, ordenadas
+  com comparação tipada e fatiadas.
+- Diferente dos filtros de URL (semi-join), o `JOIN` SQL tem semântica SQL
+  plena: linhas duplicadas no lado do join **multiplicam** o resultado.
+
+Erros de sintaxe/planejamento retornam `400` com a posição; classe inexistente,
+`404`.
+
 ## Checkpoint manual
 
 ### `POST /v1/checkpoint` — dispara um checkpoint síncrono
