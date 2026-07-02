@@ -904,8 +904,12 @@ func onlyAlias(set map[string]bool, alias string) bool {
 	return len(set) == 1 && set[alias]
 }
 
-// foldKey renders a join-key value into its canonical hash form: numbers via
-// fieldString (so 24 and "24" collide as intended), strings folded.
+// foldKey renders a join-key value into its canonical hash form so that the
+// number 24 and the string "24" collide (common when one class stores a code as
+// int and another as text), while non-numeric text is folded. Integers that
+// exceed float64's exact range (|n| > 2^53, e.g. a 19-digit external id) are
+// kept as their exact digit string — never floated — so distinct big ids don't
+// collapse into the same bucket and multiply the join.
 func (x *sqlExec) foldKey(v any) (string, bool) {
 	if v == nil {
 		return "", false
@@ -917,8 +921,27 @@ func (x *sqlExec) foldKey(v any) (string, bool) {
 	if !ok {
 		return "", false
 	}
-	if f, err := strconv.ParseFloat(strings.TrimSpace(s), 64); err == nil {
-		return strconv.FormatFloat(f, 'f', -1, 64), true
+	ts := strings.TrimSpace(s)
+	if k, ok := numericKey(ts); ok {
+		return k, true
 	}
 	return x.fo.fold(s), true
+}
+
+// maxExactFloat is 2^53: the largest integer float64 represents exactly.
+const maxExactFloat = 1 << 53
+
+// numericKey returns a canonical key for a numeric string. Values within
+// float64's exact range are normalized through a float (so "24" == "24.0" ==
+// 24); larger integers are returned verbatim (trimmed) to preserve precision.
+// Returns ok=false when the string is not numeric.
+func numericKey(ts string) (string, bool) {
+	f, err := strconv.ParseFloat(ts, 64)
+	if err != nil {
+		return "", false
+	}
+	if f < -maxExactFloat || f > maxExactFloat {
+		return ts, true // out of exact range: compare as exact digits
+	}
+	return strconv.FormatFloat(f, 'f', -1, 64), true
 }

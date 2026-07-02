@@ -138,6 +138,24 @@ func TestHTTPSQLQuery(t *testing.T) {
 		}
 	})
 
+	t.Run("join on big integer id keeps precision", func(t *testing.T) {
+		// Two distinct 19-digit ids that collapse to the same float64 (they differ
+		// only below 2^53 precision). A correct hash join must NOT match across them.
+		do(t, "POST", base+"/v1/classes", map[string]any{"name": "bairro"})
+		do(t, "POST", base+"/v1/classes", map[string]any{"name": "viela"})
+		do(t, "POST", base+"/v1/classes/bairro/objects", map[string]any{"idExterno": "6754180773847478681", "nome": "RINCAO"})
+		do(t, "POST", base+"/v1/classes/bairro/objects", map[string]any{"idExterno": "6754180773847478682", "nome": "OUTRO"})
+		do(t, "POST", base+"/v1/classes/viela/objects", map[string]any{"bairroId": "6754180773847478681", "nome": "RUA X"})
+
+		_, m := query(t, base, `
+			SELECT v.nome AS rua, b.nome AS bairro
+			FROM viela v JOIN bairro b ON v.bairroId = b.idExterno`)
+		rows := rowsOf(t, m)
+		if len(rows) != 1 || rows[0]["bairro"] != "RINCAO" {
+			t.Fatalf("big-int join matched wrong/duplicate rows: %v", rows)
+		}
+	})
+
 	t.Run("parse error returns 400", func(t *testing.T) {
 		resp, _ := query(t, base, "SELECT FROM WHERE")
 		if resp.StatusCode != 400 {
