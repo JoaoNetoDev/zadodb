@@ -123,6 +123,86 @@ func TestHTTPProjectNamespace(t *testing.T) {
 	}
 }
 
+// TestHTTPJoinAndFolding models the real dataset: logradouro -> municipio -> uf,
+// then queries logradouro filtered by a related uf.sigla and municipio.nome,
+// with accent/case folding on by default ("mossoro" matches "Mossoró").
+func TestHTTPJoinAndFolding(t *testing.T) {
+	ts := newTestServer(t)
+	base := ts.URL
+
+	for _, c := range []string{"uf", "municipio", "logradouro"} {
+		if resp, _ := do(t, "POST", base+"/v1/classes", map[string]any{"name": c}); resp.StatusCode != 201 {
+			t.Fatalf("create class %s = %d", c, resp.StatusCode)
+		}
+	}
+	// Register the FK chain once.
+	mkRel := func(class string, rel map[string]any) {
+		if resp, _ := do(t, "POST", base+"/v1/classes/"+class+"/relationships", rel); resp.StatusCode != 201 {
+			t.Fatalf("create rel on %s = %d", class, resp.StatusCode)
+		}
+	}
+	mkRel("logradouro", map[string]any{"localField": "municipioCodigo", "toClass": "municipio", "remoteField": "codigoIbge"})
+	mkRel("municipio", map[string]any{"localField": "codigoUf", "toClass": "uf", "remoteField": "codigoUf"})
+
+	// Seed data: RN (sigla) with two municipios; SP with one.
+	do(t, "POST", base+"/v1/classes/uf/objects", map[string]any{"codigoUf": 24, "sigla": "RN", "nome": "Rio Grande do Norte"})
+	do(t, "POST", base+"/v1/classes/uf/objects", map[string]any{"codigoUf": 35, "sigla": "SP", "nome": "São Paulo"})
+	do(t, "POST", base+"/v1/classes/municipio/objects", map[string]any{"codigoIbge": 2408102, "codigoUf": 24, "nome": "Mossoró"})
+	do(t, "POST", base+"/v1/classes/municipio/objects", map[string]any{"codigoIbge": 2411403, "codigoUf": 24, "nome": "Natal"})
+	do(t, "POST", base+"/v1/classes/municipio/objects", map[string]any{"codigoIbge": 3550308, "codigoUf": 35, "nome": "São Paulo"})
+	// Logradouros: two in Mossoró, one in Natal, one in SP capital.
+	do(t, "POST", base+"/v1/classes/logradouro/objects", map[string]any{"municipioCodigo": 2408102, "nome": "RUA A"})
+	do(t, "POST", base+"/v1/classes/logradouro/objects", map[string]any{"municipioCodigo": 2408102, "nome": "RUA B"})
+	do(t, "POST", base+"/v1/classes/logradouro/objects", map[string]any{"municipioCodigo": 2411403, "nome": "RUA C"})
+	do(t, "POST", base+"/v1/classes/logradouro/objects", map[string]any{"municipioCodigo": 3550308, "nome": "RUA D"})
+
+	count := func(url string) int {
+		resp, m := do(t, "GET", url, nil)
+		if resp.StatusCode != 200 {
+			t.Fatalf("GET %s = %d (%v)", url, resp.StatusCode, m)
+		}
+		return int(m["count"].(float64))
+	}
+
+	// The headline query: logradouros in RN whose municipio starts with "mossor"
+	// (accent/case-insensitive by default). %25 is the URL-encoded %.
+	if n := count(base + "/v1/classes/logradouro/objects?eq.uf.sigla=RN&like.municipio.nome=mossor%25"); n != 2 {
+		t.Errorf("RN + mossor%% = %d, want 2 (the two Mossoró streets)", n)
+	}
+	// Accent folding proven: pattern "mossoró" (with accent) still hits, and the
+	// stored value "Mossoró" matches the unaccented "mossor".
+	if n := count(base + "/v1/classes/logradouro/objects?like.municipio.nome=mossoró%25"); n != 2 {
+		t.Errorf("accented pattern = %d, want 2", n)
+	}
+	// Whole state RN (both municipios) -> 3 streets.
+	if n := count(base + "/v1/classes/logradouro/objects?eq.uf.sigla=RN"); n != 3 {
+		t.Errorf("all RN = %d, want 3", n)
+	}
+	// Combine a base-class filter with the join.
+	if n := count(base + "/v1/classes/logradouro/objects?eq.uf.sigla=RN&like.municipio.nome=mossor%25&like.nome=rua%20a"); n != 1 {
+		t.Errorf("RN + mossor + base nome 'rua a' = %d, want 1", n)
+	}
+	// Unknown relation alias -> 400.
+	if resp, _ := do(t, "GET", base+"/v1/classes/logradouro/objects?eq.estado.x=1", nil); resp.StatusCode != 400 {
+		t.Errorf("unknown relation = %d, want 400", resp.StatusCode)
+	}
+
+	// include= embeds the related parent objects (multi-hop: uf via municipio).
+	resp, m := do(t, "GET", base+"/v1/classes/logradouro/objects?eq.uf.sigla=RN&like.municipio.nome=mossor%25&include=municipio,uf&limit=1", nil)
+	if resp.StatusCode != 200 || int(m["count"].(float64)) != 1 {
+		t.Fatalf("include query = %d count=%v", resp.StatusCode, m["count"])
+	}
+	row := m["objects"].([]any)[0].(map[string]any)
+	muni, ok := row["municipio"].(map[string]any)
+	if !ok || muni["nome"] != "Mossoró" {
+		t.Errorf("embedded municipio = %v, want nome Mossoró", row["municipio"])
+	}
+	uf, ok := row["uf"].(map[string]any)
+	if !ok || uf["sigla"] != "RN" {
+		t.Errorf("embedded uf = %v, want sigla RN", row["uf"])
+	}
+}
+
 func TestHTTPCRUDFlow(t *testing.T) {
 	ts := newTestServer(t)
 	base := ts.URL

@@ -21,6 +21,8 @@ const (
 	OpCreateClass                   // register a class
 	OpDropClass                     // drop a class
 	OpBatch                         // atomic batch: apply Sub entries all-or-nothing
+	OpCreateRel                     // register a relationship (foreign key) on a class
+	OpDropRel                       // drop a relationship
 )
 
 // WALEntry is the logical mutation stored (msgpack-encoded) in a record's
@@ -34,8 +36,9 @@ type WALEntry struct {
 	Op        OpType     `msgpack:"op"`
 	Project   string     `msgpack:"prj,omitempty"` // virtual namespace; "" is the default project
 	Class     string     `msgpack:"class"`
+	Name      string     `msgpack:"name,omitempty"` // relationship name for OpCreateRel/OpDropRel
 	ObjectID  int64      `msgpack:"id,omitempty"`
-	Data      []byte     `msgpack:"data,omitempty"` // object payload (msgpack) for OpPut / class meta for OpCreateClass
+	Data      []byte     `msgpack:"data,omitempty"` // object payload (msgpack) / class meta / relationship spec (msgpack)
 	Timestamp int64      `msgpack:"ts"`
 	Sub       []WALEntry `msgpack:"sub,omitempty"` // sub-mutations for OpBatch
 }
@@ -67,6 +70,7 @@ func UnmarshalEntry(payload []byte) (WALEntry, error) {
 const (
 	nsClass  = 0x01 // class definition keys sort before all object keys
 	nsObject = 0x02 // object row keys
+	nsRel    = 0x03 // relationship (foreign key) definition keys
 	keySep   = 0x00
 )
 
@@ -126,6 +130,44 @@ func ObjectPrefix(project, class string) []byte {
 	return k
 }
 
+// RelKey returns the B+Tree key for a relationship definition. Relationship keys
+// live in their own namespace but share the project scoping of class keys, so
+// they survive checkpoint compaction (key-agnostic) like everything else.
+func RelKey(project, class, name string) []byte {
+	sp := scope(project)
+	k := make([]byte, 0, 1+len(sp)+len(class)+1+len(name))
+	k = append(k, nsRel)
+	k = append(k, sp...)
+	k = append(k, class...)
+	k = append(k, keySep)
+	k = append(k, name...)
+	return k
+}
+
+// DecodeRelKey parses a relationship key back into its project, class and name.
+func DecodeRelKey(key []byte) (project, class, name string, ok bool) {
+	// [nsRel] + [project + keySep] + class + [keySep] + name
+	if len(key) < 1+1 || key[0] != nsRel {
+		return "", "", "", false
+	}
+	// The last keySep separates class from name; the optional first keySep
+	// (present only for named projects) separates project from class.
+	body := key[1:]
+	last := -1
+	for i := 0; i < len(body); i++ {
+		if body[i] == keySep {
+			last = i
+		}
+	}
+	if last < 0 {
+		return "", "", "", false
+	}
+	name = string(body[last+1:])
+	head := body[:last] // project(optional) + class
+	project, class = splitScope(head)
+	return project, class, name, true
+}
+
 // splitScope splits a key body (project/class portion, no namespace byte and no
 // trailing id) into its project and class. A body with no 0x00 belongs to the
 // default project; one with a 0x00 carries "project + 0x00 + class".
@@ -182,6 +224,8 @@ func (e WALEntry) Key() []byte {
 	switch e.Op {
 	case OpCreateClass, OpDropClass:
 		return ClassKey(e.Project, e.Class)
+	case OpCreateRel, OpDropRel:
+		return RelKey(e.Project, e.Class, e.Name)
 	default:
 		return ObjectKey(e.Project, e.Class, e.ObjectID)
 	}

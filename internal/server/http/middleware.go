@@ -25,9 +25,9 @@ func writeError(w http.ResponseWriter, status int, msg string) {
 // errorStatus maps engine sentinel errors to HTTP status codes.
 func errorStatus(err error) int {
 	switch {
-	case errors.Is(err, storage.ErrNoClass), errors.Is(err, storage.ErrNotFound):
+	case errors.Is(err, storage.ErrNoClass), errors.Is(err, storage.ErrNotFound), errors.Is(err, storage.ErrNoRel):
 		return http.StatusNotFound
-	case errors.Is(err, storage.ErrClassExists), errors.Is(err, storage.ErrClassNotEmpty):
+	case errors.Is(err, storage.ErrClassExists), errors.Is(err, storage.ErrClassNotEmpty), errors.Is(err, storage.ErrRelExists):
 		return http.StatusConflict
 	case errors.Is(err, storage.ErrInvalidName):
 		return http.StatusBadRequest

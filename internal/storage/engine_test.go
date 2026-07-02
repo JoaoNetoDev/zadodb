@@ -307,6 +307,80 @@ func TestEngineProjectIsolation(t *testing.T) {
 	}
 }
 
+// TestEngineKeysetPagination proves the streaming keyset path: paging with
+// `after` yields the same ascending sequence as offset paging, spans the
+// checkpoint boundary (snapshot + overlay merged in id order), and honors
+// deletes in the overlay.
+func TestEngineKeysetPagination(t *testing.T) {
+	dir := t.TempDir()
+	e, err := Open(Config{Dir: dir})
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer e.Close()
+	e.CreateClass("", "Item")
+	for i := 0; i < 25; i++ {
+		e.CreateObject("", "Item", []byte(fmt.Sprintf("v%d", i+1)))
+	}
+	// Checkpoint the first 25 into the snapshot, then add 15 more to the overlay
+	// so the scan must merge both runs by id.
+	if err := e.Checkpoint(); err != nil {
+		t.Fatalf("Checkpoint: %v", err)
+	}
+	for i := 25; i < 40; i++ {
+		e.CreateObject("", "Item", []byte(fmt.Sprintf("v%d", i+1)))
+	}
+	// Delete a snapshot object and an overlay object.
+	e.DeleteObject("", "Item", 10)
+	e.DeleteObject("", "Item", 30)
+
+	// Page through with keyset (limit 7) and collect ids.
+	var got []int64
+	var after int64
+	for {
+		page, err := e.QueryPage("", "Item", nil, 7, 0, after)
+		if err != nil {
+			t.Fatalf("QueryPage after=%d: %v", after, err)
+		}
+		if len(page) == 0 {
+			break
+		}
+		for _, o := range page {
+			got = append(got, o.ID)
+		}
+		after = page[len(page)-1].ID
+		if len(page) < 7 {
+			break
+		}
+	}
+
+	// Expected: 1..40 minus the two deletes, ascending.
+	var want []int64
+	for id := int64(1); id <= 40; id++ {
+		if id == 10 || id == 30 {
+			continue
+		}
+		want = append(want, id)
+	}
+	if len(got) != len(want) {
+		t.Fatalf("keyset returned %d ids, want %d", len(got), len(want))
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("keyset id[%d] = %d, want %d", i, got[i], want[i])
+		}
+	}
+
+	// Keyset must agree with offset paging for a middle window.
+	off, _ := e.QueryPage("", "Item", nil, 5, 10, 0) // skip 10 matches
+	ks, _ := e.QueryPage("", "Item", nil, 5, 0, want[9])
+	for i := range off {
+		if off[i].ID != ks[i].ID {
+			t.Fatalf("offset vs keyset mismatch at %d: %d != %d", i, off[i].ID, ks[i].ID)
+		}
+	}
+}
+
 func TestEngineCreateObjectsBulk(t *testing.T) {
 	dir := t.TempDir()
 	e, err := Open(Config{Dir: dir})

@@ -40,6 +40,42 @@ atômico `CURRENT`:
 5. **Swap + limpeza**: troca o snapshot de leitura para a nova geração, apaga o
    `wal.applying.log`, remove gerações antigas (best-effort).
 
+## Gatilhos: automático, manual e a válvula `max_overlay`
+
+Por default o checkpoint é **automático**, disparado quando o WAL cresce além de
+`checkpoint.wal_bytes` ou pelo timer `checkpoint.interval_sec`.
+
+Dois controles ajustam esse comportamento (config YAML em `checkpoint:` ou flags
+equivalentes no `serve`):
+
+- **`manual: true`** (`--checkpoint-manual`): desabilita o checkpoint
+  **automático**. A consolidação do WAL só ocorre quando disparada
+  explicitamente pelo endpoint `POST /v1/checkpoint` (ver
+  [api/rest-api](../api/rest-api.md)).
+- **`max_overlay: <N>`** (`--checkpoint-max-overlay=<N>`): **válvula anti-OOM**.
+  Força um checkpoint quando o overlay em memória passa de `N` entradas,
+  **mesmo em modo manual**. `0` desliga a válvula.
+
+O overlay guarda todas as escritas confirmadas ainda não dobradas no arquivo de
+dados; sem checkpoint ele cresce indefinidamente. A válvula garante um teto de
+memória mesmo quando o operador esqueceu (ou adiou de propósito) o checkpoint
+manual.
+
+### Por que o modo manual acelera o import em massa
+
+O checkpoint compactante **transmite a árvore base inteira** para construir a
+geração nova (ver passo 2). Sob checkpoint automático durante uma carga pesada,
+isso se repete a **cada** rodada disparada pelo crescimento do WAL — e cada
+rodada re-lê e re-escreve toda a base acumulada até ali. Num HD USB lento, esse
+custo somado chegava a ~48min.
+
+Com `--checkpoint-manual`, o import roda **sem nenhum checkpoint**: cada lote vai
+só para o WAL (append + fsync). Ao final, um único `POST /v1/checkpoint`
+consolida tudo numa **única** compactação. Uma passada pela base em vez de
+várias — o import termina muito mais rápido. (Deixe a válvula `max_overlay`
+ligada como rede de segurança se o volume importado puder exceder a RAM
+disponível para o overlay.)
+
 ## Recovery (`recovery.Recover`), no boot
 
 Recovery **nunca** muta a geração ativa in-place (evita risco de meta page

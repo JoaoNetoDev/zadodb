@@ -29,6 +29,8 @@ type Config struct {
 	Checkpoint struct {
 		WALBytes    int64 `yaml:"wal_bytes"`
 		IntervalSec int   `yaml:"interval_sec"`
+		Manual      bool  `yaml:"manual"`      // disable auto-checkpoint; fold only via POST /v1/checkpoint
+		MaxOverlay  int   `yaml:"max_overlay"` // safety cap: force a fold when overlay exceeds this (even in manual mode)
 	} `yaml:"checkpoint"`
 }
 
@@ -96,9 +98,11 @@ func (c Config) FsyncMode() wal.FsyncMode {
 // StorageConfig builds the engine configuration.
 func (c Config) StorageConfig() storage.Config {
 	return storage.Config{
-		Dir:                c.DataDir,
-		Fsync:              c.FsyncMode(),
-		CheckpointWALBytes: c.Checkpoint.WALBytes,
-		CheckpointInterval: time.Duration(c.Checkpoint.IntervalSec) * time.Second,
+		Dir:                  c.DataDir,
+		Fsync:                c.FsyncMode(),
+		CheckpointWALBytes:   c.Checkpoint.WALBytes,
+		CheckpointInterval:   time.Duration(c.Checkpoint.IntervalSec) * time.Second,
+		CheckpointManual:     c.Checkpoint.Manual,
+		CheckpointMaxOverlay: c.Checkpoint.MaxOverlay,
 	}
 }

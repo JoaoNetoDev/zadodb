@@ -156,18 +156,37 @@ func (s *Server) handleListObjects(w http.ResponseWriter, r *http.Request) {
 	q := r.URL.Query()
 	limit := parseIntDefault(q.Get("limit"), 100)
 	offset := parseIntDefault(q.Get("offset"), 0)
+	after := int64(parseIntDefault(q.Get("after"), 0)) // keyset cursor: ids > after
 
-	m, err := parseFilters(q)
+	fo := parseFoldOpts(q)
+	var baseSpecs, relSpecs []filterSpec
+	for _, sp := range parseFilterSpecs(q) {
+		if sp.alias == "" {
+			baseSpecs = append(baseSpecs, sp)
+		} else {
+			relSpecs = append(relSpecs, sp)
+		}
+	}
+	baseMatcher, err := buildMatcher(baseSpecs, fo)
 	if err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
+
 	var match func([]byte) (bool, error)
-	if m != nil {
-		match = m.match
+	switch {
+	case len(relSpecs) > 0:
+		pred, err := s.buildJoinPredicate(project, class, baseMatcher, relSpecs, fo)
+		if err != nil {
+			writeError(w, http.StatusBadRequest, err.Error())
+			return
+		}
+		match = pred
+	case baseMatcher != nil:
+		match = baseMatcher.match
 	}
 
-	objs, err := s.engine.QueryObjects(project, class, match, limit, offset)
+	objs, err := s.engine.QueryPage(project, class, match, limit, offset, after)
 	if err != nil {
 		writeEngineError(w, err)
 		return
@@ -181,12 +200,25 @@ func (s *Server) handleListObjects(w http.ResponseWriter, r *http.Request) {
 		}
 		out = append(out, obj)
 	}
-	writeJSON(w, http.StatusOK, map[string]any{
+	// Embed related parent objects when requested: ?include=municipio,uf
+	if inc := parseCSV(q.Get("include")); len(inc) > 0 {
+		if err := s.attachIncludes(project, class, out, inc); err != nil {
+			writeError(w, http.StatusBadRequest, err.Error())
+			return
+		}
+	}
+	resp := map[string]any{
 		"objects": out,
 		"count":   len(out),
 		"limit":   limit,
 		"offset":  offset,
-	})
+	}
+	// Keyset cursor: when a full page came back, echo the last id so the client
+	// can fetch the next page with ?after=<next_after> (O(page), no offset walk).
+	if limit > 0 && len(objs) == limit {
+		resp["next_after"] = objs[len(objs)-1].ID
+	}
+	writeJSON(w, http.StatusOK, resp)
 }
 
 // projectHeader is the HTTP header carrying the virtual namespace ("project").
@@ -205,6 +237,22 @@ func parseID(w http.ResponseWriter, r *http.Request) (int64, bool) {
 		return 0, false
 	}
 	return id, true
+}
+
+// parseCSV splits a comma-separated query value, trimming spaces and dropping
+// empties (e.g. include=municipio,uf).
+func parseCSV(s string) []string {
+	if strings.TrimSpace(s) == "" {
+		return nil
+	}
+	parts := strings.Split(s, ",")
+	out := make([]string, 0, len(parts))
+	for _, p := range parts {
+		if p = strings.TrimSpace(p); p != "" {
+			out = append(out, p)
+		}
+	}
+	return out
 }
 
 func parseIntDefault(s string, def int) int {

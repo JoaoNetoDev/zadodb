@@ -181,7 +181,7 @@ func parseWALDeltas(retired string, baseApplied uint64) (map[string]delta, [][]b
 		// Flatten batches; later records overwrite earlier ones for a key.
 		for _, sub := range entry.Flatten() {
 			switch sub.Op {
-			case wal.OpDelete, wal.OpDropClass:
+			case wal.OpDelete, wal.OpDropClass, wal.OpDropRel:
 				deltas[string(sub.Key())] = delta{deleted: true}
 			default:
 				deltas[string(sub.Key())] = delta{data: sub.Data}

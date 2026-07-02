@@ -154,6 +154,7 @@ Erro: `404` classe não existe.
 | `eq.<campo>=valor` | Igualdade exata (comparação como string) |
 | `like.<campo>=padrão` | SQL LIKE: `%` = qualquer sequência, `_` = um caractere |
 | `ci=false` | Opta por case-**sensitive** (o padrão é case-insensitive) |
+| `ai=false` | Opta por acento-**sensível** (o padrão é acento-insensível) |
 
 `limit`/`offset` paginam sobre os **resultados** que casaram. Lembre de
 URL-encodar o `%` como `%25`.
@@ -175,13 +176,264 @@ GET /v1/classes/logradouro/objects?eq.uf=SP&ci=false
 > milhões. Ótimo para buscas ocasionais; para busca rápida e repetida em
 > escala, índices secundários são o próximo passo (fase futura).
 
+### Ignorar acento e caixa (folding)
+
+Por **default**, tanto `eq.` quanto `like.` comparam ignorando **caixa** e
+**acento** — inclusive nos filtros de relação (ver [JOINs](#joins-consulta-por-campos-de-classes-relacionadas)).
+Dois parâmetros de query controlam isso:
+
+| Param | Default | Efeito |
+|---|---|---|
+| `ci` | `true` | `ci=false` torna a comparação case-**sensitive** |
+| `ai` | `true` | `ai=false` torna a comparação acento-**sensível** |
+
+A dobragem (*fold*) é aplicada dos **dois lados** da comparação: faz lowercase e
+remove diacríticos latinos (`á à â ã ä ç é ê í ó ô õ ú ü ñ ý` e maiúsculas
+correspondentes). Assim `mossoro` casa `Mossoró`, `MoSsoRó`, etc.
+
+```
+# padrão: ignora acento e caixa
+GET /v1/classes/municipio/objects?eq.nome=mossoro
+
+# exige acento e caixa exatos:
+GET /v1/classes/municipio/objects?eq.nome=Mossor%C3%B3&ci=false&ai=false
+```
+
+### Paginação keyset (`after` / `next_after`)
+
+Além de `offset`/`limit`, a listagem aceita **`after=<id>`**: retorna os objetos
+com id **estritamente maior** que `<id>`, em ordem crescente de id, até `limit`.
+Internamente isso é um *seek* na B+Tree (custo O(tamanho-da-página)), em vez de
+descartar as primeiras `offset` linhas (O(offset)) — **prefira `after` para
+paginação profunda em classes grandes.**
+
+Quando a página vem **cheia** (`count == limit`), a resposta inclui
+**`next_after`**, o id do último objeto retornado; passe-o como `?after=` para
+pedir a próxima página. Quando a página vem incompleta, `next_after` é omitido
+(fim da sequência).
+
+```json
+200 {
+  "objects": [ {"id":101,"nome":"..."}, {"id":102,"nome":"..."} ],
+  "count": 2, "limit": 2, "after": 100, "next_after": 102
+}
+```
+
+```
+# primeira página:
+GET /v1/classes/logradouro/objects?limit=1000
+# próxima, a partir do next_after devolvido:
+GET /v1/classes/logradouro/objects?limit=1000&after=1000
+```
+
+`offset`/`limit` continuam funcionando (caminho legado, O(n)). `after` combina
+com filtros e joins.
+
+## Relacionamentos (foreign keys)
+
+Uma **relação** liga um campo de uma classe (origem) a um campo de outra classe
+(destino). Registra-se a relação **uma vez por classe**; depois as consultas
+podem filtrar por campos das classes relacionadas (ver [JOINs](#joins-consulta-por-campos-de-classes-relacionadas)).
+Todas as rotas respeitam o header `X-Zado-Project`.
+
+### `POST /v1/classes/{class}/relationships` — cria uma relação
+```json
+// request
+{
+  "name": "municipio",
+  "localField": "municipioCodigo",
+  "toClass": "municipio",
+  "remoteField": "codigoIbge"
+}
+// 201
+{
+  "name": "municipio",
+  "localField": "municipioCodigo",
+  "toClass": "municipio",
+  "remoteField": "codigoIbge"
+}
+```
+
+- `name` é **opcional** (default = `toClass`) e é como as consultas referenciam a
+  relação (o *alias*).
+- `localField` é o campo na classe origem; `remoteField` é o campo na classe
+  destino (`toClass`).
+
+Erros: `409` se a relação já existe, `404` se a classe origem **ou** a classe
+destino (`toClass`) não existe, `400` corpo inválido.
+
+### `GET /v1/classes/{class}/relationships` — lista relações da classe
+```json
+200 { "relationships": [ {"name":"municipio","localField":"municipioCodigo","toClass":"municipio","remoteField":"codigoIbge"} ] }
+```
+
+### `DELETE /v1/classes/{class}/relationships/{name}` — remove uma relação
+`204` em sucesso. `404` se não existe.
+
+Exemplo — modelar o dataset `logradouro → municipio → uf`:
+```sh
+# logradouro.municipioCodigo -> municipio.codigoIbge
+curl -X POST http://127.0.0.1:7373/v1/classes/logradouro/relationships \
+  -H 'Content-Type: application/json' \
+  -d '{"localField":"municipioCodigo","toClass":"municipio","remoteField":"codigoIbge"}'
+
+# municipio.codigoUf -> uf.codigoUf
+curl -X POST http://127.0.0.1:7373/v1/classes/municipio/relationships \
+  -H 'Content-Type: application/json' \
+  -d '{"localField":"codigoUf","toClass":"uf","remoteField":"codigoUf"}'
+```
+(Sem `name`, o alias de cada relação vira o nome da classe destino: `municipio` e
+`uf`.)
+
+## JOINs: consulta por campos de classes relacionadas
+
+Com relações registradas, a listagem aceita filtros **com ponto** que apontam
+para campos de uma classe relacionada, usando o **alias** da relação:
+
+| Param | Significado |
+|---|---|
+| `eq.<rel>.<campo>=valor` | Igualdade no campo de uma classe relacionada |
+| `like.<rel>.<campo>=padrão` | LIKE no campo de uma classe relacionada |
+
+- `<rel>` é o **nome (alias)** da relação — por default o nome da classe destino.
+- O servidor faz **BFS no grafo de relações** para achar o caminho da classe base
+  até a classe do alias, então **múltiplos saltos** são resolvidos
+  automaticamente.
+- Filtros **sem ponto** no campo continuam aplicando à **classe base** e podem
+  combinar com os de relação.
+- Os parâmetros `ci`/`ai` (folding) valem também para os filtros de relação.
+
+Exemplo real (join de 2 saltos): logradouros cujo município começa com "mossor"
+no estado (uf.sigla) `RN`:
+```
+GET /v1/classes/logradouro/objects?eq.uf.sigla=RN&like.municipio.nome=mossor%25
+```
+Aqui `logradouro` tem `municipioCodigo → municipio.codigoIbge` e `municipio` tem
+`codigoUf → uf.codigoUf`; o servidor encadeia os dois saltos sozinho. Como o
+folding é o default, "mossor" casa "Mossor..." acento/caixa-insensível.
+
+Erros/limitações:
+- **Alias desconhecido ou inalcançável** (não há caminho no grafo) → `400 Bad
+  Request`.
+- Sem índice secundário: cada salto é um *semi-join* O(n) sobre a classe
+  relacionada (fase futura; será PR próprio). Classes relacionadas costumam ser
+  pequenas (`municipio`, `uf`), então o custo é dominado pelo scan da classe base.
+- Se houver **múltiplas relações para a mesma classe destino**, a resolução usa a
+  **primeira** encontrada.
+
+### Trazer os campos do pai (`include`)
+
+Os filtros de relação **filtram**, mas por padrão não trazem os dados do pai. Para
+**embutir** o objeto relacionado em cada linha do resultado, use
+`include=<rel>[,<rel>...]` (os mesmos nomes de relação dos filtros). Cada relação
+listada vira uma chave no objeto retornado, com o **objeto pai completo** (segue
+o caminho no grafo, então saltos múltiplos como `uf` via `municipio` também
+funcionam):
+
+```
+GET /v1/classes/logradouro/objects?eq.uf.sigla=RN&eq.municipio.nome=mossoro&include=municipio,uf&limit=1
+```
+```json
+{
+  "objects": [{
+    "id": 3234386, "nome": "ANTONIO IVO MARINHO", "municipioCodigo": 2408003,
+    "municipio": { "id": 5163, "nome": "Mossoró", "codigoIbge": 2408003, "codigoUf": 24 },
+    "uf":        { "id": 11, "nome": "Rio Grande do Norte", "sigla": "RN", "codigoUf": 24 }
+  }],
+  "count": 1
+}
+```
+
+As classes relacionadas são carregadas uma vez num mapa por chave (são pequenas);
+cada linha resolve o pai por lookup O(1). Se a cadeia de um registro não resolver
+(FK órfã), a chave do alias vem como `null`.
+
+Ver [architecture/joins](../architecture/joins.md) para o algoritmo.
+
+## Consulta SQL (`POST /v1/query`)
+
+Além dos filtros de URL, um subconjunto de SQL padrão é aceito em
+`POST /v1/query`. O corpo pode ser `{"sql": "SELECT ..."}` (JSON) ou o texto SQL
+puro. O project vem do header `X-Zado-Project`, ou pode ser qualificado por
+tabela (`FROM projeto.classe`).
+
+Gramática suportada:
+
+```sql
+SELECT [FIRST n] * | expr [AS nome] [, ...]
+FROM [projeto.]classe [[AS] alias]
+[ [INNER|LEFT|RIGHT] JOIN [projeto.]classe [[AS] alias] ON a.x = b.y ]...
+[ WHERE expr ]            -- AND/OR/NOT, = <> != < <= > >=, LIKE, NOT LIKE,
+                          -- IN (...), IS [NOT] NULL
+[ ORDER BY expr [ASC|DESC] [, ...] ]
+[ LIMIT n [OFFSET m] ]    -- sem LIMIT, o padrão é 100 linhas
+```
+
+Expressões incluem `COALESCE(a, b, ...)`, `CAST(expr AS INT|FLOAT|STRING|BOOL|DATE)`,
+`UPPER`/`LOWER`, literais (`'texto'`, `123`, `TRUE`, `NULL`) e colunas
+(`campo` ou `alias.campo`). Strings comparam com folding de caixa e acento por
+padrão (`'mossoro' = 'Mossoró'`); desative com `?ci=false` / `?ai=false` na URL.
+Comparações são tipadas: números comparam numericamente (mesmo se um lado for
+string numérica), datas cronologicamente (ISO 8601 ou `dd/mm/aaaa`; force com
+`CAST(... AS DATE)`), o resto como texto folded.
+
+```
+POST /v1/query
+{"sql": "SELECT l.nome, m.nome AS cidade, u.sigla AS uf
+         FROM logradouro l
+         JOIN municipio m ON l.municipioCodigo = m.codigoIbge
+         JOIN uf u ON m.codigoUf = u.codigoUf
+         WHERE u.sigla = 'RN' AND m.nome = 'mossoro' AND l.nome LIKE '%nio%ivo%'
+         ORDER BY l.nome
+         LIMIT 10"}
+```
+```json
+{"rows": [{"nome": "ANTONIO IVO MARINHO", "cidade": "Mossoró", "uf": "RN"}], "count": 1}
+```
+
+Execução (sem índice secundário ainda):
+
+- A classe do `FROM` é varrida em **streaming** por páginas keyset (memória de
+  pico = página + overlay, mesmo com milhões de linhas).
+- Conjuntos do `WHERE` que só tocam a classe base são **empurrados para o scan**
+  (pushdown), descartando linhas antes de qualquer trabalho de join.
+- Cada `JOIN` deve ser uma **equi-join** (`ON a.x = b.y`); a classe do join é
+  carregada uma vez num hash map e cada linha da base resolve em O(1).
+  `LEFT JOIN` preenche com `NULL` quando não casa; `RIGHT JOIN` emite ao final
+  as linhas do lado direito que nunca casaram.
+- Sem `ORDER BY`/`RIGHT JOIN`, o scan **para** assim que `OFFSET+LIMIT` linhas
+  foram produzidas. Com `ORDER BY`, as linhas que casam são coletadas, ordenadas
+  com comparação tipada e fatiadas.
+- Diferente dos filtros de URL (semi-join), o `JOIN` SQL tem semântica SQL
+  plena: linhas duplicadas no lado do join **multiplicam** o resultado.
+
+Erros de sintaxe/planejamento retornam `400` com a posição; classe inexistente,
+`404`.
+
+## Checkpoint manual
+
+### `POST /v1/checkpoint` — dispara um checkpoint síncrono
+Consolida o WAL num arquivo de dados novo (compactação) de forma **síncrona** e
+retorna quando concluído:
+```json
+200 { "checkpoints": 4, "active_gen": 4, "last_checkpoint": "2026-07-01T12:00:00Z" }
+```
+
+É a peça complementar do **modo manual** (`checkpoint.manual: true` /
+`--checkpoint-manual`), que desabilita o checkpoint automático. O uso ideal é ao
+**fim de uma carga em massa**: importe com `--checkpoint-manual` e chame este
+endpoint **uma vez** no final. Isso evita re-transmitir a árvore base a cada
+rodada de checkpoint durante o import — o gargalo que fazia o checkpoint demorar
+~48min num HD USB. Ver
+[architecture/recovery-and-checkpoint](../architecture/recovery-and-checkpoint.md).
+
 ## Códigos de erro
 
 | Status | Significado |
 |---|---|
-| 400 | Corpo inválido / nome de classe inválido / id inválido |
-| 404 | Classe ou objeto não existe |
-| 409 | Classe já existe / classe não está vazia |
+| 400 | Corpo inválido / nome de classe inválido / id inválido / alias de relação desconhecido ou inalcançável |
+| 404 | Classe, objeto ou relação não existe / classe destino inexistente |
+| 409 | Classe já existe / classe não está vazia / relação já existe |
 | 500 | Erro interno |
 
 Corpo de erro: `{ "error": "mensagem" }`.

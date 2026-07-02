@@ -10,31 +10,35 @@ import (
 func TestLikeToRegex(t *testing.T) {
 	cases := []struct {
 		pat, s string
-		ci     bool
+		ci, ai bool
 		want   bool
 	}{
-		{"%nio%ivo%", "Antonio Nascivo", false, true}, // "nio" then "ivo" in order
-		{"%nio%ivo%", "Antonio Ivo", false, false},    // "Ivo" capitalized -> lowercase "ivo" absent
-		{"%nio%ivo%", "Antonio Ivo", true, true},      // ci makes "Ivo" match "ivo"
-		{"%nio%ivo%", "Ivo Antonio", false, false},    // wrong order
-		{"Rua %", "Rua das Flores", false, true},
-		{"Rua %", "Avenida Brasil", false, false},
-		{"S_o Paulo", "Sao Paulo", false, true}, // _ = single char
-		{"S_o Paulo", "Sxo Paulo", false, true},
-		{"S_o Paulo", "Soo Paulo", false, true},
-		{"S_o Paulo", "So Paulo", false, false},   // _ needs exactly one char
-		{"%SP%", "cidade sp litoral", true, true}, // case-insensitive
-		{"%SP%", "cidade sp litoral", false, false},
-		{"exato", "exato", false, true},
-		{"exato", "exatox", false, false},
+		{"%nio%ivo%", "Antonio Nascivo", false, false, true}, // "nio" then "ivo" in order
+		{"%nio%ivo%", "Antonio Ivo", false, false, false},    // "Ivo" capitalized -> lowercase "ivo" absent
+		{"%nio%ivo%", "Antonio Ivo", true, false, true},      // ci makes "Ivo" match "ivo"
+		{"%nio%ivo%", "Ivo Antonio", false, false, false},    // wrong order
+		{"Rua %", "Rua das Flores", false, false, true},
+		{"Rua %", "Avenida Brasil", false, false, false},
+		{"S_o Paulo", "Sao Paulo", false, false, true}, // _ = single char
+		{"S_o Paulo", "So Paulo", false, false, false}, // _ needs exactly one char
+		{"%SP%", "cidade sp litoral", true, false, true},
+		{"%SP%", "cidade sp litoral", false, false, false},
+		{"exato", "exato", false, false, true},
+		{"exato", "exatox", false, false, false},
+		// Accent-insensitivity (ai): folded pattern matches folded text.
+		{"mossoro%", "Mossoró do Norte", true, true, true},
+		{"mossoró%", "MOSSORO", true, true, true},
+		{"são%", "Sao Paulo", true, true, true},
+		{"mossoro%", "Mossoró", true, false, false}, // ai off -> ó != o
 	}
 	for _, c := range cases {
-		re, err := likeToRegex(c.pat, c.ci)
+		fo := foldOpts{ci: c.ci, ai: c.ai}
+		re, err := likeToRegex(fo.fold(c.pat))
 		if err != nil {
 			t.Fatalf("likeToRegex(%q): %v", c.pat, err)
 		}
-		if got := re.MatchString(c.s); got != c.want {
-			t.Errorf("LIKE %q (ci=%v) vs %q = %v, want %v", c.pat, c.ci, c.s, got, c.want)
+		if got := re.MatchString(fo.fold(c.s)); got != c.want {
+			t.Errorf("LIKE %q (ci=%v ai=%v) vs %q = %v, want %v", c.pat, c.ci, c.ai, c.s, got, c.want)
 		}
 	}
 }

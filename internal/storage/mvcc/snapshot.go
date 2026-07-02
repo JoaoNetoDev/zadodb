@@ -89,6 +89,13 @@ func (s *Snapshot) Scan(prefix []byte, fn func(key, value []byte) bool) error {
 	return btree.Scan(s, s.root, prefix, fn)
 }
 
+// ScanRange visits every key/value in [lo, hi) in ascending order. A tight lo
+// seeks into the tree (used for keyset pagination) instead of scanning from the
+// class prefix.
+func (s *Snapshot) ScanRange(lo, hi []byte, fn func(key, value []byte) bool) error {
+	return btree.ScanRange(s, s.root, lo, hi, fn)
+}
+
 // Release drops this reader's reference. When a retired snapshot's last
 // reference is released, its mapping is unmapped.
 func (s *Snapshot) Release() {

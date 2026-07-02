@@ -76,3 +76,42 @@ todos idênticos — a garantia de corrupção-zero sob kill não é afetada. Em
 memória, o conjunto de classes e o gerador de ids são chaveados por
 `project + 0x00 + classe` (`wal.ScopeKey`), mantendo a mesma classe independente
 entre projects.
+
+## Consulta / paginação
+
+A listagem/consulta de objetos (ver [api/rest-api](../api/rest-api.md)) roda em
+**streaming**, sem materializar a classe inteira. A visão consistente de uma
+classe é a fusão de duas fontes ordenadas por id:
+
+- o **snapshot mmap** da geração ativa (dados já checkpointados);
+- o **overlay** em memória (escritas confirmadas ainda não dobradas no arquivo de
+  dados).
+
+A consulta faz o **merge** dessas duas sequências como um *merge-join* por id (o
+overlay vence quando os ids coincidem; deletes suprimem o objeto), emitindo
+objetos em ordem crescente de id. Só os que passam pelos filtros e cabem na
+página são retornados. O **pico de memória** é, portanto, *página retornada +
+overlay* — não cresce com o tamanho da classe. É isso que mantém classes grandes
+e joins sem estourar a RAM.
+
+### Keyset (cursor) vs. offset
+
+Duas formas de paginar sobre essa sequência ordenada:
+
+- **`offset`/`limit`** (legado): descarta as primeiras `offset` linhas casadas —
+  **O(offset)**, degrada em paginação profunda.
+- **`after=<id>`** (keyset): faz um **seek** na B+Tree para a primeira chave com
+  id > `<id>` e segue dali — **O(tamanho-da-página)**, independente da
+  profundidade. A resposta devolve `next_after` (id do último objeto) quando a
+  página vem cheia, para o cliente encadear a próxima com `?after=<next_after>`.
+
+O seek keyset se aplica ao snapshot mmap; o overlay, muito menor, é posicionado
+por busca na estrutura ordenada em memória. Prefira `after` para varredura
+sequencial de classes grandes.
+
+### Resolvedor de joins (semi-joins)
+
+Filtros por campos de classes relacionadas (`eq.<rel>.<campo>`) são resolvidos
+como uma **cadeia de semi-joins** sobre o mesmo caminho de consulta em streaming,
+usando BFS no grafo de relações para achar o caminho da classe base até a classe
+do alias. Detalhes em [joins](joins.md).
